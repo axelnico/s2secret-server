@@ -2,8 +2,12 @@
 name = "s2secret-server"
 version = "0.1.0"
 edition = "2021"
+authors = ["Nicolas Axel Bukovits <8598589+axelnico@users.noreply.github.com>"]
 
 [dependencies]
 axum = "0.7.5"
 tokio = { version = "1.39.3", features = ["full"] }
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
+sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rustls"] }
+dotenvy = "0.15.7"
+serde = { version = "1.0.209", features = ["derive"] }
