@@ -1,0 +1,10 @@
+[package]
+name = "s2secret-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
+sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rustls", "uuid"] }
+base64 = "0.22.1"
+serde = { version = "1.0.209", features = ["derive"] }

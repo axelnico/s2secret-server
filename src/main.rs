@@ -1,10 +1,28 @@
 use axum::{Router, extract::State, Json, routing::{get,post,delete,put}};
 use axum::extract::Path;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
+use std::env;
+use std::sync::Arc;
+use sqlx::PgPool;
+use s2secret_service::Secret;
 
+type AppState = Arc<AppStateInner>;
+
+struct AppStateInner {
+    database_pool: PgPool,
+}
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    let s2secret_database_url = env::var("DATABASE_URL").expect("DATABASE_URL is not set in .env file");
+    let s2secret_database = PgPoolOptions::new().connect(&s2secret_database_url).await.expect("Cannot connect to s2secret database");
+
+    sqlx::migrate!().run(&s2secret_database).await?;
+
+    let s2secret_state = Arc::new(AppStateInner {database_pool:s2secret_database });
+
     let s2secret = Router::new()
         .route("/", get(health_check))
         .route("/secrets", get(secrets_descriptive_data).post(add_new_secret))
@@ -23,18 +41,20 @@ async fn main() {
         .route("/user/emergency-contacts", get(emergency_contacts)
                                                 .post(create_emergency_contact))
         .route("/user/emergency-contacts/:emergency_contact_id", put(update_emergency_contact)
-                                                                 .delete(delete_emergency_contact));
+                                                                 .delete(delete_emergency_contact))
+        .with_state(s2secret_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, s2secret).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, s2secret).await?;
+    Ok(())
 }
 
 async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn secrets_descriptive_data() -> &'static str {
-    "TODO: return descriptive data of all secrets"
+async fn secrets_descriptive_data(s2secret_state: State<AppState>) -> Json<Vec<Secret>> {
+    Json(Secret::descriptive_data(&s2secret_state.database_pool).await)
 }
 
 async fn secret_descriptive_data(Path(secret_id): Path<Uuid>) -> &'static str {
