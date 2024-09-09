@@ -1,9 +1,12 @@
-use axum::{Router, extract::State, Json, routing::{get,post,delete,put}};
+use axum::{Router, extract::State, Json, routing::{get, post, delete, put}, Error};
 use axum::extract::Path;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use std::env;
 use std::sync::Arc;
+use axum::http::{StatusCode, Uri};
+use axum::response::IntoResponse;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use s2secret_service::Secret;
 
@@ -11,6 +14,25 @@ type AppState = Arc<AppStateInner>;
 
 struct AppStateInner {
     database_pool: PgPool,
+}
+
+#[derive(Serialize)]
+struct S2SecretError<'a> {
+    msg: &'a str
+}
+
+#[derive(Serialize)]
+struct S2SecretCreateResponse {
+    id_secret: Uuid
+}
+
+#[derive(Deserialize, Serialize)]
+struct NewSecretRequest {
+    title: String,
+    user_name: Option<String>,
+    site: Option<String>,
+    notes: Option<String>,
+    server_share: String,
 }
 
 #[tokio::main]
@@ -42,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
                                                 .post(create_emergency_contact))
         .route("/user/emergency-contacts/:emergency_contact_id", put(update_emergency_contact)
                                                                  .delete(delete_emergency_contact))
+        .fallback(fallback)
         .with_state(s2secret_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -49,16 +72,24 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn fallback(uri: Uri) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, format!("No route for {uri}"))
+}
+
 async fn health_check() -> &'static str {
     "OK"
 }
 
 async fn secrets_descriptive_data(s2secret_state: State<AppState>) -> Json<Vec<Secret>> {
-    Json(Secret::descriptive_data(&s2secret_state.database_pool).await)
+    Json(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool).await)
 }
 
-async fn secret_descriptive_data(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: return descriptive data of a specific secret"
+async fn secret_descriptive_data(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
+    let secret_descriptive_data = Secret::descriptive_data_of_secret(&secret_id, &s2secret_state.database_pool).await;
+    match secret_descriptive_data {
+        Some(secret) => Json(secret).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+    }
 }
 
 async fn modify_secret(Path(secret_id): Path<Uuid>) -> &'static str {
@@ -70,7 +101,16 @@ async fn delete_secret(Path(secret_id): Path<Uuid>) -> &'static str {
 async fn secret_share(Path(secret_id): Path<Uuid>) -> &'static str {
     "TODO: return server share of secret"
 }
-async fn add_new_secret() {}
+async fn add_new_secret(s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
+    let new_secret_uuid = Secret::create_new_secret(&secret_request.title,
+                              secret_request.user_name.as_ref(),
+                              secret_request.site.as_ref(),
+                              secret_request.notes.as_ref(),
+                              &secret_request.server_share,
+                              &s2secret_state.database_pool
+    ).await;
+    (StatusCode::CREATED, Json(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
+}
 
 async fn secret_emergency_contacts(Path(secret_id): Path<Uuid>) -> &'static str {
     "TODO: return emergency contacts associated with a secret"

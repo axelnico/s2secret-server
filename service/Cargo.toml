@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
-sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rustls", "uuid"] }
+sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rustls", "uuid", "chrono"] }
 base64 = "0.22.1"
 serde = { version = "1.0.209", features = ["derive"] }
+chrono = { version = "0.4.38", features = ["serde"] }
