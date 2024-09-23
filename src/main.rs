@@ -8,7 +8,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::Secret;
+use s2secret_service::{Secret, SecretShare};
 
 type AppState = Arc<AppStateInner>;
 
@@ -33,6 +33,14 @@ struct NewSecretRequest {
     site: Option<String>,
     notes: Option<String>,
     server_share: String,
+}
+#[derive(Deserialize, Serialize)]
+struct SecretPatchRequest {
+    title: Option<String>,
+    user_name: Option<String>,
+    site: Option<String>,
+    notes: Option<String>,
+    server_share: Option<String>,
 }
 
 #[tokio::main]
@@ -92,14 +100,33 @@ async fn secret_descriptive_data(Path(secret_id): Path<Uuid>, s2secret_state: St
     }
 }
 
-async fn modify_secret(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: modify a specific secret"
+async fn modify_secret(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Json<SecretPatchRequest>) -> impl IntoResponse {
+    let modified_secret_id = Secret::modify_secret(&secret_id,
+                                                   secret_update_request.title.as_ref(),
+                                                   secret_update_request.user_name.as_ref(),
+                                                   secret_update_request.site.as_ref(),
+                                                   secret_update_request.notes.as_ref(),
+                                                   secret_update_request.server_share.as_ref(),
+                                                   &s2secret_state.database_pool).await;
+
+    match modified_secret_id {
+        Some(modified_secret_id) => Json(S2SecretCreateResponse { id_secret: modified_secret_id  }).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+    }
 }
-async fn delete_secret(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: delete all associated data of a specific secret"
+async fn delete_secret(Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
+    let deleted_secret_id = Secret::delete_secret(&secret_id, &s2secret_state.database_pool).await;
+    match deleted_secret_id {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+    }
 }
-async fn secret_share(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: return server share of secret"
+async fn secret_share(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
+    let secret_share = SecretShare::secret_share(&secret_id,&s2secret_state.database_pool).await;
+    match secret_share {
+        Some(secret_share) => Json(secret_share).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+    }
 }
 async fn add_new_secret(s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
     let new_secret_uuid = Secret::create_new_secret(&secret_request.title,
