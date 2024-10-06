@@ -8,7 +8,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{Secret, SecretShare};
+use s2secret_service::{EmergencyContact, Secret, SecretShare, User};
 
 type AppState = Arc<AppStateInner>;
 
@@ -41,6 +41,21 @@ struct SecretPatchRequest {
     site: Option<String>,
     notes: Option<String>,
     server_share: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+struct NewEmergencyContactRequest {
+    email: String,
+    description: String,
+    server_key_file: String,
+    server_share: String
+}
+
+#[derive(Deserialize)]
+struct EmergencyAccessRequest {
+    id_emergency_contact: Uuid,
+    server_ticket: String,
+    server_v: String,
+    server_a: String
 }
 
 #[tokio::main]
@@ -139,17 +154,27 @@ async fn add_new_secret(s2secret_state: State<AppState>, secret_request: Json<Ne
     (StatusCode::CREATED, Json(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
 }
 
-async fn secret_emergency_contacts(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: return emergency contacts associated with a secret"
+async fn secret_emergency_contacts(Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
+    Json(EmergencyContact::emergency_contacts_of_secret(&secret_id,&s2secret_state.database_pool).await)
 }
 
-async fn add_emergency_contact_to_secret(Path(secret_id): Path<Uuid>) -> &'static str {
-    "TODO: Associate an emergency contact to a secret"
+async fn add_emergency_contact_to_secret(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, emergency_access_request: Json<EmergencyAccessRequest>) -> impl IntoResponse {
+    let emergency_contact_uuid = EmergencyContact::add_emergency_contact_to_secret(&secret_id,
+                                                                                   &emergency_access_request.id_emergency_contact,
+                                                                                   &emergency_access_request.server_ticket,
+                                                                                   &emergency_access_request.server_v,
+                                                                                   &emergency_access_request.server_a,
+                                                                                   &s2secret_state.database_pool).await;
+    match emergency_contact_uuid {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        None => (StatusCode::BAD_REQUEST, Json(S2SecretError { msg: "Invalid data provided to add emergency contact to secret"})).into_response()
+    }
 }
 
-async fn remove_emergency_contact_from_secret(Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>)
-                                              -> &'static str {
-    "TODO: Remove an emergency contact from a secret"
+async fn remove_emergency_contact_from_secret(Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>,s2secret_state: State<AppState>)
+                                              -> impl IntoResponse {
+    EmergencyContact::remove_emergency_contact_from_secret(&secret_id,&emergency_contact_id,&s2secret_state.database_pool).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>)
@@ -157,15 +182,15 @@ async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact
     "TODO: Send required emergency access data to a contact"
 }
 
-async fn user_data() -> &'static str {
-    "TODO: return user data, including server-key-file"
+async fn user_data(s2secret_state: State<AppState>) -> Json<User> {
+    Json(User::data(&s2secret_state.database_pool).await)
 }
 
-async fn emergency_contacts() -> &'static str {
-    "TODO: return all emergency contacts of current user"
+async fn emergency_contacts(s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
+    Json(EmergencyContact::emergency_contacts(&s2secret_state.database_pool).await)
 }
 
-async fn create_emergency_contact() -> &'static str {
+async fn create_emergency_contact(s2secret_state: State<AppState>, emergency_contact_request: Json<NewEmergencyContactRequest>) -> impl IntoResponse {
     "TODO: create new emergency contact for current user"
 }
 
