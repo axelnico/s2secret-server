@@ -20,4 +20,6 @@ s2secret-service = { path = "service"}
 rand = "0.9.0"
 argon2 = "0.5.3"
 axum_session = { version = "0.16.0",features = ["rest_mode"]}
+axum_session_auth = { version = "0.16.0",features = ["rest_mode"]}
 axum_session_sqlx = {version = "0.5.0", default-features = false, features = ["postgres"] }
+async-trait = "0.1.87"

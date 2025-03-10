@@ -4,15 +4,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 #[derive(Deserialize, Serialize)]
 pub struct User {
-    id_user: Uuid,
-    email: String,
+    pub id_user: Uuid,
+    pub email: String,
     name: String,
     server_key_file: String
 }
 
 impl User {
-    pub async fn data(database: &PgPool) -> Self {
-        sqlx::query_as!(Self, "SELECT id_user, email, name, server_key_file from s2secret_user").fetch_one(database).await.unwrap()
+    pub async fn data(database: &PgPool, id: Uuid) -> Option<Self> {
+        sqlx::query_as!(Self, "SELECT id_user, email, name, server_key_file from s2secret_user WHERE id_user = $1", id).fetch_optional(database).await.unwrap()
     }
 
     pub async fn create_new_user(database: &PgPool, email: &String, name: &String, password_file: &[u8]) -> Uuid {
@@ -26,5 +26,9 @@ impl User {
 
     pub async fn password_file_bytes(database: &PgPool, email: &String) -> Option<Vec<u8>> {
         sqlx::query_scalar!("SELECT password_file from s2secret_user WHERE email = $1", email).fetch_optional(database).await.unwrap()
+    }
+
+    pub async fn user_id(database: &PgPool, email: &String) -> Option<Uuid> {
+        sqlx::query_scalar!("SELECT id_user from s2secret_user WHERE email = $1", email).fetch_optional(database).await.unwrap()
     }
 }

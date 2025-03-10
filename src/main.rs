@@ -12,8 +12,13 @@ use s2secret_service::{EmergencyContact, Secret, SecretShare, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
-use axum_session::{Session, SessionConfig, SessionLayer, SessionMode, SessionStore};
+use async_trait::async_trait;
+use axum_session::{ReadOnlySession, Session, SessionConfig, SessionLayer, SessionMode, SessionStore};
 use axum_session_sqlx::{SessionPgPool, SessionPgSession, SessionPgSessionStore};
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::Response;
+use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -99,6 +104,51 @@ struct UserLoginFinishRequest {
     email: String,
     message: CredentialFinalization<DefaultCipherSuite>
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthUser {
+    pub id: Uuid,
+    pub username: String,
+    pub anonymous: bool,
+}
+
+impl Default for AuthUser {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            anonymous: true,
+            username: "guest".into(),
+        }
+    }
+}
+#[async_trait]
+impl Authentication<AuthUser, Uuid, PgPool> for AuthUser {
+    async fn load_user(userid: Uuid, pool: Option<&PgPool>) -> Result<AuthUser, anyhow::Error> {
+        let pool = pool.unwrap();
+
+        let user_data = User::data(pool, userid).await;
+
+        match user_data {
+            Some(user) => Ok(AuthUser {
+                id: user.id_user,
+                username: user.email,
+                anonymous: false,
+            }),
+            None => Err(anyhow::anyhow!("User not found"))
+        }
+    }
+
+    fn is_authenticated(&self) -> bool {
+        !self.anonymous
+    }
+
+    fn is_active(&self) -> bool {
+        !self.anonymous
+    }
+
+    fn is_anonymous(&self) -> bool {
+        self.anonymous
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -109,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!().run(&s2secret_database).await?;
 
     let session_config = SessionConfig::default().with_table_name("auth_sessions").with_session_name("session-id");
+    let auth_config = AuthConfig::<Uuid>::default().with_anonymous_user_id(Some(Uuid::new_v4()));
 
     let session_store = SessionPgSessionStore::new(Some(s2secret_database.clone().into()), session_config)
         .await?;
@@ -116,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     let mut random_number_generator = OsRng;
     let authentication_server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut random_number_generator);
 
-    let s2secret_state = Arc::new(AppStateInner {database_pool:s2secret_database, opaque_ciphersuite: authentication_server_setup });
+    let s2secret_state = Arc::new(AppStateInner {database_pool:s2secret_database.clone(), opaque_ciphersuite: authentication_server_setup });
 
     let s2secret = Router::new()
         .route("/", get(health_check))
@@ -132,19 +183,24 @@ async fn main() -> anyhow::Result<()> {
                                                delete(remove_emergency_contact_from_secret))
         .route("/secrets/{secret_id}/emergency-contacts/{emergency_contact_id}/send" ,
                                              post(send_emergency_access_data_to_contact))
-        .route("/auth/config",get(opaque_config))
-        .route("/auth/user/register", post(user_registration_start))
-        .route("/auth/user/register-finalize", post(user_registration_finish))
-        .route("/auth/user/login", post(user_login_start))
-        .route("/auth/user/login-finalize", post(user_login_finish))
-        .route("/auth/user/logout", post(user_logout))
         .route("/user", get(user_data))
         .route("/user/emergency-contacts", get(emergency_contacts)
                                                 .post(create_emergency_contact))
         .route("/user/emergency-contacts/{emergency_contact_id}", put(update_emergency_contact)
                                                                  .delete(delete_emergency_contact))
         .fallback(fallback)
+        .layer(axum::middleware::from_fn(auth_middleware))
+        .route("/auth/config",get(opaque_config))
+        .route("/auth/user/register", post(user_registration_start))
+        .route("/auth/user/register-finalize", post(user_registration_finish))
+        .route("/auth/user/login", post(user_login_start))
+        .route("/auth/user/login-finalize", post(user_login_finish))
+        .route("/auth/user/logout", post(user_logout))
         .with_state(s2secret_state)
+        .layer(
+            AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database))
+                .with_config(auth_config),
+        )
         .layer(SessionLayer::new(session_store));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -239,8 +295,8 @@ async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact
     "TODO: Send required emergency access data to a contact"
 }
 
-async fn user_data(s2secret_state: State<AppState>) -> Json<User> {
-    Json(User::data(&s2secret_state.database_pool).await)
+async fn user_data(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
+    Json(User::data(&s2secret_state.database_pool,auth.current_user.unwrap().id).await)
 }
 
 async fn emergency_contacts(s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
@@ -260,7 +316,6 @@ async fn delete_emergency_contact() -> &'static str {
 }
 
 async fn user_registration_start(s2secret_state: State<AppState>,session: SessionPgSession, user_init_registration_request: Json<UserRegistrationRequest>) -> impl IntoResponse {
-    println!("Init registration {} {}", user_init_registration_request.email, user_init_registration_request.name);
     let server_registration_start_result = ServerRegistration::<DefaultCipherSuite>::start(
         &s2secret_state.opaque_ciphersuite,
         user_init_registration_request.message.clone(),
@@ -270,12 +325,12 @@ async fn user_registration_start(s2secret_state: State<AppState>,session: Sessio
 }
 
 async fn user_registration_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_finish_registration_request: Json<UserRegistrationFinishResult>) -> impl IntoResponse {
-    println!("Finalizing registration {} {}", user_finish_registration_request.email, user_finish_registration_request.name);
     let password_file = ServerRegistration::<DefaultCipherSuite>::finish(user_finish_registration_request.message.clone());
     User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.email, &user_finish_registration_request.name, &*password_file.serialize()).await;
+    (StatusCode::CREATED).into_response()
 }
 #[axum::debug_handler]
-async fn user_login_start(s2secret_state: State<AppState>,session: SessionPgSession, user_login_request: Json<UserLoginRequest>) -> impl IntoResponse {
+async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Json<UserLoginRequest>) -> impl IntoResponse {
     let mut server_rng = OsRng;
     let password_file_bytes = User::password_file_bytes(&s2secret_state.database_pool, &user_login_request.email).await;
     let server_login_start_result = ServerLogin::<DefaultCipherSuite>::start(
@@ -289,17 +344,27 @@ async fn user_login_start(s2secret_state: State<AppState>,session: SessionPgSess
         user_login_request.email.as_bytes(),
         ServerLoginStartParameters::default(),
     ).unwrap();
-    session.set("login_start_state", server_login_start_result.state.serialize());
+    auth.session.set("login_start_state", server_login_start_result.state.serialize());
     Json(server_login_start_result.message.serialize())
 }
 
-async fn user_login_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_login_request: Json<UserLoginFinishRequest>) -> impl IntoResponse {
-    let server_login_state: Vec<u8> = session.get("login_start_state").unwrap();
-    println!("Session received {}", session.get_session_id());
+async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Json<UserLoginFinishRequest>) -> impl IntoResponse {
+    let server_login_state: Vec<u8> = auth.session.get("login_start_state").unwrap();
     let server_login_state = ServerLogin::<DefaultCipherSuite>::deserialize(&server_login_state).unwrap();
-    let server_login_finish_result = server_login_state.finish(user_login_request.message.clone()).unwrap();
-    session.set("session_key",server_login_finish_result.session_key);
-    StatusCode::OK.into_response()
+    let server_login_finish_result = server_login_state.finish(user_login_request.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&user_login_request.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    auth.login_user(logged_in_user_id);
+    auth.session.set("session_key",server_login_finish_result.session_key);
+    (StatusCode::OK).into_response()
+}
+
+pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, request: Request,next: Next) -> Result<Response, StatusCode> {
+    if auth.is_authenticated() {
+        Ok(next.run(request).await)
+    }
+    else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 async fn user_logout(s2secret_state: State<AppState>, session: SessionPgSession) -> impl IntoResponse {
