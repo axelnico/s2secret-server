@@ -326,20 +326,23 @@ async fn user_registration_start(s2secret_state: State<AppState>,session: Sessio
 
 async fn user_registration_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_finish_registration_request: Json<UserRegistrationFinishResult>) -> impl IntoResponse {
     let password_file = ServerRegistration::<DefaultCipherSuite>::finish(user_finish_registration_request.message.clone());
-    User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.email, &user_finish_registration_request.name, &*password_file.serialize()).await;
+    User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.email, &user_finish_registration_request.name, &*password_file.serialize(), &*s2secret_state.opaque_ciphersuite.serialize()).await;
     (StatusCode::CREATED).into_response()
 }
 #[axum::debug_handler]
 async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Json<UserLoginRequest>) -> impl IntoResponse {
     let mut server_rng = OsRng;
-    let password_file_bytes = User::password_file_bytes(&s2secret_state.database_pool, &user_login_request.email).await;
+    let mut password_file: Option<ServerRegistration<DefaultCipherSuite>> = None;
+    let mut server_setup = s2secret_state.opaque_ciphersuite.clone();
+    let user_registration_data = User::registration_data(&s2secret_state.database_pool, &user_login_request.email).await;
+    if let Some(user_registration_data) = user_registration_data {
+        password_file = Some(ServerRegistration::<DefaultCipherSuite>::deserialize(&user_registration_data.password_file).unwrap());
+        server_setup = ServerSetup::<DefaultCipherSuite>::deserialize(&user_registration_data.server_auth_setup).unwrap();
+    }
     let server_login_start_result = ServerLogin::<DefaultCipherSuite>::start(
         &mut server_rng,
-        &s2secret_state.opaque_ciphersuite,
-        match password_file_bytes {
-            Some(password_file_bytes) => Some(ServerRegistration::<DefaultCipherSuite>::deserialize(&password_file_bytes).unwrap()),
-            None => None
-        },
+        &server_setup,
+        password_file,
         user_login_request.message.clone(),
         user_login_request.email.as_bytes(),
         ServerLoginStartParameters::default(),
@@ -367,8 +370,9 @@ pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, Pg
     }
 }
 
-async fn user_logout(s2secret_state: State<AppState>, session: SessionPgSession) -> impl IntoResponse {
-    session.clear();
+async fn user_logout(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
+    auth.session.clear();
+    auth.logout_user();
     StatusCode::NO_CONTENT.into_response()
 }
 async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {
