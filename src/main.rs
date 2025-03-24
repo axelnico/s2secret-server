@@ -188,14 +188,14 @@ async fn main() -> anyhow::Result<()> {
                                                 .post(create_emergency_contact))
         .route("/user/emergency-contacts/{emergency_contact_id}", put(update_emergency_contact)
                                                                  .delete(delete_emergency_contact))
-        .fallback(fallback)
+        .route("/auth/user/logout", post(user_logout))
         .layer(axum::middleware::from_fn(auth_middleware))
         .route("/auth/config",get(opaque_config))
         .route("/auth/user/register", post(user_registration_start))
         .route("/auth/user/register-finalize", post(user_registration_finish))
         .route("/auth/user/login", post(user_login_start))
         .route("/auth/user/login-finalize", post(user_login_finish))
-        .route("/auth/user/logout", post(user_logout))
+        .fallback(fallback)
         .with_state(s2secret_state)
         .layer(
             AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database))
@@ -356,6 +356,7 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
     let server_login_state = ServerLogin::<DefaultCipherSuite>::deserialize(&server_login_state).unwrap();
     let server_login_finish_result = server_login_state.finish(user_login_request.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
     let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&user_login_request.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    auth.session.renew();
     auth.login_user(logged_in_user_id);
     auth.session.set("session_key",server_login_finish_result.session_key);
     (StatusCode::OK).into_response()
