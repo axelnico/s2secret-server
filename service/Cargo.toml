@@ -9,3 +9,4 @@ sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rus
 base64 = "0.22.1"
 serde = { version = "1.0.209", features = ["derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
+rand = "0.9.0"

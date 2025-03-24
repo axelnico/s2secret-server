@@ -1,4 +1,5 @@
 use chrono::Utc;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -7,7 +8,7 @@ pub struct User {
     pub id_user: Uuid,
     pub email: String,
     name: String,
-    server_key_file: String
+    server_key_file: Vec<u8>
 }
 
 #[derive(Deserialize, Serialize)]
@@ -24,9 +25,10 @@ impl User {
     pub async fn create_new_user(database: &PgPool, email: &String, name: &String, password_file: &[u8], server_auth_setup:&[u8]) -> Uuid {
         let new_user_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
-        let dummy_server_key_file = "dummy server key file";
+        let mut server_key_file = [0u8; 32];
+        rand::rng().fill(&mut server_key_file);
         sqlx::query!("INSERT INTO s2secret_user(id_user, email, name, server_key_file, created_at, password_file, server_auth_setup) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                                new_user_id, email, name, dummy_server_key_file ,now, password_file, server_auth_setup).execute(database).await.unwrap();
+                                new_user_id, email, name, &server_key_file ,now, password_file, server_auth_setup).execute(database).await.unwrap();
         new_user_id
     }
 
