@@ -33,12 +33,13 @@ impl Secret {
                                    site: Option<&String>,
                                    notes: Option<&String>,
                                    server_share: &String,
+                                   user_id: &Uuid,
                                    database: &PgPool) -> Uuid {
         let new_secret_id = Uuid::new_v4();
         let server_share_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
-        sqlx::query!("INSERT INTO secret(id_secret, title, user_name, site, notes) VALUES ($1, $2, $3, $4, $5)",
-                                new_secret_id, title, user_name, site, notes).execute(database).await.unwrap();
+        sqlx::query!("INSERT INTO secret(id_secret, title, user_name, site, notes, user_id) VALUES ($1, $2, $3, $4, $5, $6)",
+                                new_secret_id, title, user_name, site, notes, user_id).execute(database).await.unwrap();
         sqlx::query!("INSERT INTO secret_share(id_secret_share, server_share, created_at, updated_at, id_secret) VALUES ($1, $2, $3, $4, $5)",
                                 server_share_id, server_share, now, now, new_secret_id).execute(database).await.unwrap();
         new_secret_id

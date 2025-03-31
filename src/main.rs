@@ -256,12 +256,13 @@ async fn secret_share(Path(secret_id): Path<Uuid>, s2secret_state: State<AppStat
         None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
-async fn add_new_secret(s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
+async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
     let new_secret_uuid = Secret::create_new_secret(&secret_request.title,
                               secret_request.user_name.as_ref(),
                               secret_request.site.as_ref(),
                               secret_request.notes.as_ref(),
                               &secret_request.server_share,
+                              &auth.id,
                               &s2secret_state.database_pool
     ).await;
     (StatusCode::CREATED, Json(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
