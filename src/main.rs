@@ -125,7 +125,7 @@ impl Authentication<AuthUser, Uuid, PgPool> for AuthUser {
     async fn load_user(userid: Uuid, pool: Option<&PgPool>) -> Result<AuthUser, anyhow::Error> {
         let pool = pool.unwrap();
 
-        let user_data = User::data(pool, userid).await;
+        let user_data = User::data(pool, &userid).await;
 
         match user_data {
             Some(user) => Ok(AuthUser {
@@ -158,10 +158,18 @@ async fn main() -> anyhow::Result<()> {
 
     sqlx::migrate!().run(&s2secret_database).await?;
 
-    let session_config = SessionConfig::default().with_table_name("auth_sessions").with_session_name("session-id");
+    let session_config = SessionConfig::default().with_table_name("auth_sessions").with_session_name("session-id").with_mode(SessionMode::Persistent);
+    let manual_session_config = SessionConfig::default().with_table_name("auth_sessions").with_session_name("session-id").with_mode(SessionMode::Manual);
+
+
     let auth_config = AuthConfig::<Uuid>::default().with_anonymous_user_id(Some(Uuid::new_v4()));
 
+    let protect_routes_auth_config = AuthConfig::<Uuid>::default().with_anonymous_user_id(None);
+
     let session_store = SessionPgSessionStore::new(Some(s2secret_database.clone().into()), session_config)
+        .await?;
+
+    let protected_session_store = SessionPgSessionStore::new(Some(s2secret_database.clone().into()), manual_session_config)
         .await?;
 
     let mut random_number_generator = OsRng;
@@ -169,39 +177,59 @@ async fn main() -> anyhow::Result<()> {
 
     let s2secret_state = Arc::new(AppStateInner {database_pool:s2secret_database.clone(), opaque_ciphersuite: authentication_server_setup });
 
-    let s2secret = Router::new()
-        .route("/", get(health_check))
-        .route("/secrets", get(secrets_descriptive_data).post(add_new_secret))
-        .route("/secrets/{secret_id}", get(secret_descriptive_data)
-                                            .patch(modify_secret)
-                                            .delete(delete_secret))
-        .route("/secrets/{secret_id}/share", get(secret_share))
-        .route("/secrets/{secret_id}/emergency-contacts",
-                                              get(secret_emergency_contacts)
-                                                  .post(add_emergency_contact_to_secret))
-        .route("/secrets/{secret_id}/emergency-contacts/{emergency_contact_id}",
-                                               delete(remove_emergency_contact_from_secret))
-        .route("/secrets/{secret_id}/emergency-contacts/{emergency_contact_id}/send" ,
-                                             post(send_emergency_access_data_to_contact))
-        .route("/user", get(user_data))
-        .route("/user/emergency-contacts", get(emergency_contacts)
-                                                .post(create_emergency_contact))
-        .route("/user/emergency-contacts/{emergency_contact_id}", put(update_emergency_contact)
-                                                                 .delete(delete_emergency_contact))
-        .route("/auth/user/logout", post(user_logout))
-        .layer(axum::middleware::from_fn(auth_middleware))
-        .route("/auth/config",get(opaque_config))
-        .route("/auth/user/register", post(user_registration_start))
-        .route("/auth/user/register-finalize", post(user_registration_finish))
-        .route("/auth/user/login", post(user_login_start))
-        .route("/auth/user/login-finalize", post(user_login_finish))
-        .fallback(fallback)
-        .with_state(s2secret_state)
+    let public_routes = Router::new()
+        .route("/config",get(opaque_config))
         .layer(
-            AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database))
-                .with_config(auth_config),
+            AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
+                .with_config(protect_routes_auth_config.clone()),
+        )
+        .layer(SessionLayer::new(protected_session_store.clone()));
+
+    let anonymous_routes = Router::new()
+        .route("/user/register", post(user_registration_start))
+        .route("/user/login", post(user_login_start))
+        .route("/user/register-finalize", post(user_registration_finish))
+        .route("/user/login-finalize", post(user_login_finish))
+        .layer(
+            AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
+                .with_config(auth_config.clone()),
         )
         .layer(SessionLayer::new(session_store));
+
+
+    let protected_routes = Router::new()
+        .route("/secrets", get(secrets_descriptive_data).post(add_new_secret))
+        .route("/secrets/{secret_id}", get(secret_descriptive_data)
+            .patch(modify_secret)
+            .delete(delete_secret))
+        .route("/secrets/{secret_id}/share", get(secret_share))
+        .route("/secrets/{secret_id}/emergency-contacts",
+               get(secret_emergency_contacts)
+                   .post(add_emergency_contact_to_secret))
+        .route("/secrets/{secret_id}/emergency-contacts/{emergency_contact_id}",
+               delete(remove_emergency_contact_from_secret))
+        .route("/secrets/{secret_id}/emergency-contacts/{emergency_contact_id}/send" ,
+               post(send_emergency_access_data_to_contact))
+        .route("/user", get(user_data))
+        .route("/user/emergency-contacts", get(emergency_contacts)
+            .post(create_emergency_contact))
+        .route("/user/emergency-contacts/{emergency_contact_id}", put(update_emergency_contact)
+            .delete(delete_emergency_contact))
+        .route("/auth/user/logout", post(user_logout))
+        .layer(axum::middleware::from_fn(auth_middleware))
+        .layer(
+            AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database))
+                .with_config(protect_routes_auth_config),
+        )
+        .layer(SessionLayer::new(protected_session_store));
+
+    let s2secret = Router::new()
+        .nest("/auth",public_routes)
+        .nest("/auth", anonymous_routes)
+        .merge(protected_routes)
+        .route("/", get(health_check))
+        .fallback(fallback)
+        .with_state(s2secret_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, s2secret).await?;
@@ -216,20 +244,21 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn secrets_descriptive_data(s2secret_state: State<AppState>) -> Json<Vec<Secret>> {
-    Json(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool).await)
+async fn secrets_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>) -> Json<Vec<Secret>> {
+    Json(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool, &auth.id).await)
 }
 
-async fn secret_descriptive_data(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
-    let secret_descriptive_data = Secret::descriptive_data_of_secret(&secret_id, &s2secret_state.database_pool).await;
+async fn secret_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
+    let secret_descriptive_data = Secret::descriptive_data_of_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match secret_descriptive_data {
         Some(secret) => Json(secret).into_response(),
         None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
 
-async fn modify_secret(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Json<SecretPatchRequest>) -> impl IntoResponse {
+async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Json<SecretPatchRequest>) -> impl IntoResponse {
     let modified_secret_id = Secret::modify_secret(&secret_id,
+                                                   &auth.id,
                                                    secret_update_request.title.as_ref(),
                                                    secret_update_request.user_name.as_ref(),
                                                    secret_update_request.site.as_ref(),
@@ -242,20 +271,21 @@ async fn modify_secret(Path(secret_id): Path<Uuid>, s2secret_state: State<AppSta
         None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
-async fn delete_secret(Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
-    let deleted_secret_id = Secret::delete_secret(&secret_id, &s2secret_state.database_pool).await;
+async fn delete_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
+    let deleted_secret_id = Secret::delete_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match deleted_secret_id {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
-async fn secret_share(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
-    let secret_share = SecretShare::secret_share(&secret_id,&s2secret_state.database_pool).await;
+async fn secret_share(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
+    let secret_share = SecretShare::secret_share(&secret_id,&auth.id, &s2secret_state.database_pool).await;
     match secret_share {
         Some(secret_share) => Json(secret_share).into_response(),
         None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
+
 async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
     let new_secret_uuid = Secret::create_new_secret(&secret_request.title,
                               secret_request.user_name.as_ref(),
@@ -297,7 +327,7 @@ async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact
 }
 
 async fn user_data(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
-    Json(User::data(&s2secret_state.database_pool,auth.current_user.unwrap().id).await)
+    Json(User::data(&s2secret_state.database_pool,&auth.id).await)
 }
 
 async fn emergency_contacts(s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
@@ -365,6 +395,7 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
 
 pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, request: Request,next: Next) -> Result<Response, StatusCode> {
     if auth.is_authenticated() {
+        auth.session.set_store(true);
         Ok(next.run(request).await)
     }
     else {
@@ -375,6 +406,7 @@ pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, Pg
 async fn user_logout(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
     auth.session.clear();
     auth.logout_user();
+    // TODO: set session store to false
     StatusCode::NO_CONTENT.into_response()
 }
 async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {

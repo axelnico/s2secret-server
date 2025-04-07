@@ -21,12 +21,12 @@ pub struct SecretShare {
 
 impl Secret {
 
-    pub async fn descriptive_data_of_all_secrets(database: &PgPool) -> Vec<Self> {
-        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret").fetch_all(database).await.unwrap()
+    pub async fn descriptive_data_of_all_secrets(database: &PgPool, user_id: &Uuid) -> Vec<Self> {
+        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where user_id = $1", user_id).fetch_all(database).await.unwrap()
     }
 
-    pub async fn descriptive_data_of_secret(secret_id: &Uuid, database: &PgPool) -> Option<Self> {
-        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where id_secret = $1", secret_id).fetch_optional(database).await.unwrap()
+    pub async fn descriptive_data_of_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
+        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where user_id = $1 and id_secret = $2", user_id,secret_id).fetch_optional(database).await.unwrap()
     }
 
     pub async fn create_new_secret(title: &String, user_name: Option<&String>,
@@ -45,12 +45,12 @@ impl Secret {
         new_secret_id
     }
 
-    pub async fn modify_secret(secret_id: &Uuid,title: Option<&String>, user_name: Option<&String>,
+    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid,title: Option<&String>, user_name: Option<&String>,
                                site: Option<&String>,
                                notes: Option<&String>,
                                server_share: Option<&String>,
                                database: &PgPool) -> Option<Uuid> {
-        let secret = Self::descriptive_data_of_secret(secret_id,database).await;
+        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {
             Some(secret) => {
                 sqlx::query!("UPDATE secret set title = COALESCE($1,title), user_name = COALESCE($2,user_name), site = COALESCE($3,site), notes = COALESCE($4,notes) where id_secret = $5", title,user_name, site, notes, secret_id).execute(database).await.unwrap();
@@ -61,8 +61,8 @@ impl Secret {
         }
     }
 
-    pub async fn delete_secret(secret_id: &Uuid, database: &PgPool) -> Option<Uuid> {
-        let secret = Self::descriptive_data_of_secret(secret_id,database).await;
+    pub async fn delete_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Uuid> {
+        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {
             Some(secret) => {
                 sqlx::query!("DELETE from secret_share where id_secret = $1", secret_id).execute(database).await.unwrap();
@@ -77,7 +77,7 @@ impl Secret {
 
 impl SecretShare {
 
-    pub async fn secret_share(secret_id: &Uuid, database: &PgPool) -> Option<Self> {
-        sqlx::query_as!(Self, "SELECT server_share, created_at, updated_at from secret_share where id_secret = $1", secret_id).fetch_optional(database).await.unwrap()
+    pub async fn secret_share(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
+        sqlx::query_as!(Self, "SELECT server_share, created_at, updated_at from secret_share sh inner join secret s on s.id_secret = sh.id_secret where s.id_secret = $1 and s.user_id = $2", secret_id, user_id).fetch_optional(database).await.unwrap()
     }
 }

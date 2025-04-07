@@ -18,7 +18,7 @@ pub struct UserRegistrationData {
 }
 
 impl User {
-    pub async fn data(database: &PgPool, id: Uuid) -> Option<Self> {
+    pub async fn data(database: &PgPool, id: &Uuid) -> Option<Self> {
         sqlx::query_as!(Self, "SELECT id_user, email, name, server_key_file from s2secret_user WHERE id_user = $1", id).fetch_optional(database).await.unwrap()
     }
 
