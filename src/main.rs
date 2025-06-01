@@ -1,5 +1,5 @@
 use axum::{Router, extract::State, Json, routing::{get, post, delete, put}, Error};
-use axum::extract::Path;
+use axum::extract::{FromRequest, Path};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use std::env;
@@ -13,9 +13,11 @@ use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParamet
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
 use async_trait::async_trait;
+use axum::body::Bytes;
 use axum_session::{ReadOnlySession, Session, SessionConfig, SessionLayer, SessionMode, SessionStore};
 use axum_session_sqlx::{SessionPgPool, SessionPgSession, SessionPgSessionStore};
 use axum::extract::Request;
+use axum::http::header::CONTENT_TYPE;
 use axum::middleware::Next;
 use axum::response::Response;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
@@ -28,6 +30,44 @@ impl CipherSuite for DefaultCipherSuite {
     type KeGroup = opaque_ke::Ristretto255;
     type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
     type Ksf = Argon2<'static>;
+}
+
+// Custom CBOR extractor
+pub struct Cbor<T>(pub T);
+
+
+
+//#[async_trait]
+impl<T, S> FromRequest<S> for Cbor<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = Bytes::from_request(req, state).await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let value = ciborium::de::from_reader(bytes.as_ref())
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        Ok(Cbor(value))
+    }
+}
+
+impl<T> IntoResponse for Cbor<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        let mut buffer = Vec::new();
+        match ciborium::ser::into_writer(&self.0, &mut buffer) {
+            Ok(_) => (
+                [(CONTENT_TYPE, "application/cbor")],
+                buffer
+            ).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
 }
 
 type AppState = Arc<AppStateInner>;
@@ -361,11 +401,11 @@ async fn user_registration_finish(s2secret_state: State<AppState>,session: Sessi
     (StatusCode::CREATED).into_response()
 }
 #[axum::debug_handler]
-async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Json<UserLoginRequest>) -> impl IntoResponse {
+async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Cbor<UserLoginRequest>) -> impl IntoResponse {
     let mut server_rng = OsRng;
     let mut password_file: Option<ServerRegistration<DefaultCipherSuite>> = None;
     let mut server_setup = s2secret_state.opaque_ciphersuite.clone();
-    let user_registration_data = User::registration_data(&s2secret_state.database_pool, &user_login_request.email).await;
+    let user_registration_data = User::registration_data(&s2secret_state.database_pool, &user_login_request.0.email).await;
     if let Some(user_registration_data) = user_registration_data {
         password_file = Some(ServerRegistration::<DefaultCipherSuite>::deserialize(&user_registration_data.password_file).unwrap());
         server_setup = ServerSetup::<DefaultCipherSuite>::deserialize(&user_registration_data.server_auth_setup).unwrap();
@@ -374,19 +414,19 @@ async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<Aut
         &mut server_rng,
         &server_setup,
         password_file,
-        user_login_request.message.clone(),
-        user_login_request.email.as_bytes(),
+        user_login_request.0.message.clone(),
+        user_login_request.0.email.as_bytes(),
         ServerLoginStartParameters::default(),
     ).unwrap();
     auth.session.set("login_start_state", server_login_start_result.state.serialize());
-    Json(server_login_start_result.message.serialize())
+    Cbor(server_login_start_result.message.serialize())
 }
 
-async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Json<UserLoginFinishRequest>) -> impl IntoResponse {
+async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Cbor<UserLoginFinishRequest>) -> impl IntoResponse {
     let server_login_state: Vec<u8> = auth.session.get("login_start_state").unwrap();
     let server_login_state = ServerLogin::<DefaultCipherSuite>::deserialize(&server_login_state).unwrap();
-    let server_login_finish_result = server_login_state.finish(user_login_request.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
-    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&user_login_request.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let server_login_finish_result = server_login_state.finish(user_login_request.0.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&user_login_request.0.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
     auth.session.renew();
     auth.login_user(logged_in_user_id);
     auth.session.set("session_key",server_login_finish_result.session_key);
