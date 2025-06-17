@@ -4,6 +4,8 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use std::env;
 use std::sync::Arc;
+use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::aead::Aead;
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -14,13 +16,14 @@ use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
 use async_trait::async_trait;
 use axum::body::Bytes;
-use axum_session::{ReadOnlySession, Session, SessionConfig, SessionLayer, SessionMode, SessionStore};
+use axum_session::{DatabasePool, ReadOnlySession, Session, SessionConfig, SessionLayer, SessionMode, SessionStore};
 use axum_session_sqlx::{SessionPgPool, SessionPgSession, SessionPgSessionStore};
 use axum::extract::Request;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware::Next;
 use axum::response::Response;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
+use coset::{AsCborValue, CborSerializable, CoseEncrypt0};
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -32,10 +35,15 @@ impl CipherSuite for DefaultCipherSuite {
     type Ksf = Argon2<'static>;
 }
 
+fn decrypt_using_nonce(key: &[u8], ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u8>, ()> {
+    let key = Key::<Aes256Gcm>::from_slice(&key[..32]);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Nonce::from_slice(&nonce[..12]);
+    cipher.decrypt(nonce,ciphertext).map_err(|_| ())
+}
+
 // Custom CBOR extractor
 pub struct Cbor<T>(pub T);
-
-
 
 //#[async_trait]
 impl<T, S> FromRequest<S> for Cbor<T>
@@ -46,11 +54,33 @@ where
     type Rejection = StatusCode;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let auth_session = req.extensions().get::<AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>>().cloned();
         let bytes = Bytes::from_request(req, state).await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        let value = ciborium::de::from_reader(bytes.as_ref())
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        Ok(Cbor(value))
+        match auth_session
+        {
+            None => {
+                let value = ciborium::de::from_reader(bytes.as_ref())
+                    .map_err(|_| StatusCode::BAD_REQUEST)?;
+                Ok(Cbor(value))
+            },
+            Some(auth_session) => {
+                if auth_session.is_authenticated() {
+                    let encryption_key: Vec<u8> =  auth_session.session.get("session_key").ok_or(StatusCode::UNAUTHORIZED)?;
+                    let cose_message = CoseEncrypt0::from_slice(bytes.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
+                    let nonce = cose_message.unprotected.iv;
+                    let cbor_encrypted_payload = cose_message.ciphertext.unwrap_or_default();
+                    let decrypted_request_content = decrypt_using_nonce(&encryption_key,&cbor_encrypted_payload,&nonce).map_err(|_| StatusCode::BAD_REQUEST)?;
+                    let value = ciborium::de::from_reader(Bytes::from(decrypted_request_content).as_ref())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?;
+                    Ok(Cbor(value))
+                } else {
+                    let value = ciborium::de::from_reader(bytes.as_ref())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?;
+                    Ok(Cbor(value))
+                }
+            }
+        }
     }
 }
 
@@ -284,74 +314,75 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn secrets_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>) -> Json<Vec<Secret>> {
-    Json(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool, &auth.id).await)
+async fn secrets_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>) -> Cbor<Vec<Secret>> {
+    Cbor(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool, &auth.id).await)
 }
 
 async fn secret_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
     let secret_descriptive_data = Secret::descriptive_data_of_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match secret_descriptive_data {
-        Some(secret) => Json(secret).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+        Some(secret) => Cbor(secret).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
 
-async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Json<SecretPatchRequest>) -> impl IntoResponse {
+async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Cbor<SecretPatchRequest>) -> impl IntoResponse {
     let modified_secret_id = Secret::modify_secret(&secret_id,
                                                    &auth.id,
-                                                   secret_update_request.title.as_ref(),
-                                                   secret_update_request.user_name.as_ref(),
-                                                   secret_update_request.site.as_ref(),
-                                                   secret_update_request.notes.as_ref(),
-                                                   secret_update_request.server_share.as_ref(),
+                                                   secret_update_request.0.title.as_ref(),
+                                                   secret_update_request.0.user_name.as_ref(),
+                                                   secret_update_request.0.site.as_ref(),
+                                                   secret_update_request.0.notes.as_ref(),
+                                                   secret_update_request.0.server_share.as_ref(),
                                                    &s2secret_state.database_pool).await;
 
     match modified_secret_id {
-        Some(modified_secret_id) => Json(S2SecretCreateResponse { id_secret: modified_secret_id  }).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+        Some(modified_secret_id) => Cbor(S2SecretCreateResponse { id_secret: modified_secret_id  }).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
 async fn delete_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
     let deleted_secret_id = Secret::delete_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match deleted_secret_id {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
-        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
 async fn secret_share(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
     let secret_share = SecretShare::secret_share(&secret_id,&auth.id, &s2secret_state.database_pool).await;
     match secret_share {
-        Some(secret_share) => Json(secret_share).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(S2SecretError { msg: "Secret not found"})).into_response()
+        Some(secret_share) => Cbor(secret_share).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
 
-async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Json<NewSecretRequest>) -> impl IntoResponse {
-    let new_secret_uuid = Secret::create_new_secret(&secret_request.title,
-                              secret_request.user_name.as_ref(),
-                              secret_request.site.as_ref(),
-                              secret_request.notes.as_ref(),
-                              &secret_request.server_share,
+async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Cbor<NewSecretRequest>) -> impl IntoResponse {
+    let new_secret_uuid = Secret::create_new_secret(&secret_request.0.title,
+                              secret_request.0.user_name.as_ref(),
+                              secret_request.0.site.as_ref(),
+                              secret_request.0.notes.as_ref(),
+                              &secret_request.0.server_share,
                               &auth.id,
                               &s2secret_state.database_pool
     ).await;
-    (StatusCode::CREATED, Json(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
+    (StatusCode::CREATED, Cbor(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
 }
 
-async fn secret_emergency_contacts(Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
-    Json(EmergencyContact::emergency_contacts_of_secret(&secret_id,&s2secret_state.database_pool).await)
+async fn secret_emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> Cbor<Vec<EmergencyContact>> {
+    Cbor(EmergencyContact::emergency_contacts_of_secret(&secret_id,&auth.id,&s2secret_state.database_pool).await)
 }
 
-async fn add_emergency_contact_to_secret(Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, emergency_access_request: Json<EmergencyAccessRequest>) -> impl IntoResponse {
+async fn add_emergency_contact_to_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, emergency_access_request: Cbor<EmergencyAccessRequest>) -> impl IntoResponse {
     let emergency_contact_uuid = EmergencyContact::add_emergency_contact_to_secret(&secret_id,
-                                                                                   &emergency_access_request.id_emergency_contact,
-                                                                                   &emergency_access_request.server_ticket,
-                                                                                   &emergency_access_request.server_v,
-                                                                                   &emergency_access_request.server_a,
+                                                                                   &emergency_access_request.0.id_emergency_contact,
+                                                                                   &auth.id,
+                                                                                   &emergency_access_request.0.server_ticket,
+                                                                                   &emergency_access_request.0.server_v,
+                                                                                   &emergency_access_request.0.server_a,
                                                                                    &s2secret_state.database_pool).await;
     match emergency_contact_uuid {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
-        None => (StatusCode::BAD_REQUEST, Json(S2SecretError { msg: "Invalid data provided to add emergency contact to secret"})).into_response()
+        None => (StatusCode::BAD_REQUEST, Cbor(S2SecretError { msg: "Invalid data provided to add emergency contact to secret"})).into_response()
     }
 }
 
@@ -367,14 +398,14 @@ async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact
 }
 
 async fn user_data(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
-    Json(User::data(&s2secret_state.database_pool,&auth.id).await)
+    Cbor(User::data(&s2secret_state.database_pool,&auth.id).await)
 }
 
-async fn emergency_contacts(s2secret_state: State<AppState>) -> Json<Vec<EmergencyContact>> {
-    Json(EmergencyContact::emergency_contacts(&s2secret_state.database_pool).await)
+async fn emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,s2secret_state: State<AppState>) -> Cbor<Vec<EmergencyContact>> {
+    Cbor(EmergencyContact::emergency_contacts(&s2secret_state.database_pool,&auth.id).await)
 }
 
-async fn create_emergency_contact(s2secret_state: State<AppState>, emergency_contact_request: Json<NewEmergencyContactRequest>) -> impl IntoResponse {
+async fn create_emergency_contact(s2secret_state: State<AppState>, emergency_contact_request: Cbor<NewEmergencyContactRequest>) -> impl IntoResponse {
     "TODO: create new emergency contact for current user"
 }
 
@@ -386,18 +417,18 @@ async fn delete_emergency_contact() -> &'static str {
     "TODO: delete an emergency contact of current user"
 }
 
-async fn user_registration_start(s2secret_state: State<AppState>,session: SessionPgSession, user_init_registration_request: Json<UserRegistrationRequest>) -> impl IntoResponse {
+async fn user_registration_start(s2secret_state: State<AppState>,session: SessionPgSession, user_init_registration_request: Cbor<UserRegistrationRequest>) -> impl IntoResponse {
     let server_registration_start_result = ServerRegistration::<DefaultCipherSuite>::start(
         &s2secret_state.opaque_ciphersuite,
-        user_init_registration_request.message.clone(),
-        user_init_registration_request.email.as_bytes(),
+        user_init_registration_request.0.message.clone(),
+        user_init_registration_request.0.email.as_bytes(),
     ).unwrap();
-    Json(server_registration_start_result.message.serialize())
+    Cbor(server_registration_start_result.message.serialize())
 }
 
-async fn user_registration_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_finish_registration_request: Json<UserRegistrationFinishResult>) -> impl IntoResponse {
-    let password_file = ServerRegistration::<DefaultCipherSuite>::finish(user_finish_registration_request.message.clone());
-    User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.email, &user_finish_registration_request.name, &*password_file.serialize(), &*s2secret_state.opaque_ciphersuite.serialize()).await;
+async fn user_registration_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_finish_registration_request: Cbor<UserRegistrationFinishResult>) -> impl IntoResponse {
+    let password_file = ServerRegistration::<DefaultCipherSuite>::finish(user_finish_registration_request.0.message.clone());
+    User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.0.email, &user_finish_registration_request.0.name, &*password_file.serialize(), &*s2secret_state.opaque_ciphersuite.serialize()).await;
     (StatusCode::CREATED).into_response()
 }
 #[axum::debug_handler]
@@ -454,5 +485,5 @@ async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {
     let client_registration_start_result =
         ClientRegistration::<DefaultCipherSuite>::start(&mut client_rng, b"password").unwrap();
 
-    Json(client_registration_start_result.message)
+    Cbor(client_registration_start_result.message)
 }

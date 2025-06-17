@@ -7,8 +7,8 @@ use uuid::Uuid;
 pub struct User {
     pub id_user: Uuid,
     pub email: String,
-    name: String,
-    server_key_file: Vec<u8>
+    pub name: String,
+    pub server_key_file: Vec<u8>
 }
 
 #[derive(Deserialize, Serialize)]
