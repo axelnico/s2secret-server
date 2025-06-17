@@ -8,8 +8,8 @@ authors = ["Nicolas Axel Bukovits <8598589+axelnico@users.noreply.github.com>"]
 members = [".", "service"]
 
 [dependencies]
-axum = { version = "0.8.1", features = ["default", "macros"]}
-tokio = { version = "1.39.3", features = ["full"] }
+axum = { version = "0.8.4", features = ["default", "macros"]}
+tokio = { version = "1.45.1", features = ["full"] }
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 sqlx = { version = "0.8.1", features = ["postgres", "macros", "runtime-tokio-rustls"] }
 dotenvy = "0.15.7"
@@ -24,3 +24,5 @@ axum_session_auth = { version = "0.16.0",features = ["rest_mode"]}
 axum_session_sqlx = {version = "0.5.0", default-features = false, features = ["postgres"] }
 async-trait = "0.1.87"
 ciborium = "0.2.2"
+coset = "0.3.8"
+aes-gcm = "0.10.3"
