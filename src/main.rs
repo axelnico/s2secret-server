@@ -4,8 +4,9 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use std::env;
 use std::sync::Arc;
-use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
+use aes_gcm::aead::consts::U12;
 use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::middleware::Next;
 use axum::response::Response;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
-use coset::{AsCborValue, CborSerializable, CoseEncrypt0};
+use coset::{AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder, HeaderBuilder};
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -218,6 +219,13 @@ impl Authentication<AuthUser, Uuid, PgPool> for AuthUser {
     fn is_anonymous(&self) -> bool {
         self.anonymous
     }
+}
+
+fn encrypt_with_nonce(key: &[u8], plaintext: &[u8], nonce: Nonce<U12>) -> Result<Vec<u8>, ()> {
+    let key = Key::<Aes256Gcm>::from_slice(&key[..32]);
+    let cipher = Aes256Gcm::new(&key);
+    let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref()).map_err(|_| ())?;
+    Ok(ciphertext)
 }
 
 #[tokio::main]
@@ -467,7 +475,21 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
 pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, request: Request,next: Next) -> Result<Response, StatusCode> {
     if auth.is_authenticated() {
         auth.session.set_store(true);
-        Ok(next.run(request).await)
+        let response = next.run(request).await;
+        let (parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let encryption_key: Vec<u8> =  auth.session.get("session_key").ok_or(StatusCode::UNAUTHORIZED)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cose_protected_header = HeaderBuilder::new().algorithm(coset::iana::Algorithm::A256GCM).build();
+        let cose_unprotected_header = HeaderBuilder::new().content_type(String::from("application/cose")).iv(nonce.to_vec()).build();
+        let encrypted_body = CoseEncrypt0Builder::new()
+            .protected(cose_protected_header)
+            .unprotected(cose_unprotected_header)
+            .ciphertext(encrypt_with_nonce(&encryption_key,&body_bytes, nonce).unwrap_or_default())
+            .build();
+        Ok(Response::from_parts(parts, axum::body::Body::from(encrypted_body.to_vec().unwrap_or_default())))
     }
     else {
         Err(StatusCode::UNAUTHORIZED)
