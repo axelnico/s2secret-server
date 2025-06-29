@@ -475,12 +475,12 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
 pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, request: Request,next: Next) -> Result<Response, StatusCode> {
     if auth.is_authenticated() {
         auth.session.set_store(true);
+        let encryption_key: Vec<u8> =  auth.session.get("session_key").ok_or(StatusCode::UNAUTHORIZED)?;
         let response = next.run(request).await;
         let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let encryption_key: Vec<u8> =  auth.session.get("session_key").ok_or(StatusCode::UNAUTHORIZED)?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let cose_protected_header = HeaderBuilder::new().algorithm(coset::iana::Algorithm::A256GCM).build();
         let cose_unprotected_header = HeaderBuilder::new().content_type(String::from("application/cose")).iv(nonce.to_vec()).build();
