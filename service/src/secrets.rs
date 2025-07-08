@@ -38,10 +38,12 @@ impl Secret {
         let new_secret_id = Uuid::new_v4();
         let server_share_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
+        let mut transaction = database.begin().await.unwrap();
         sqlx::query!("INSERT INTO secret(id_secret, title, user_name, site, notes, user_id) VALUES ($1, $2, $3, $4, $5, $6)",
-                                new_secret_id, title, user_name, site, notes, user_id).execute(database).await.unwrap();
+                                new_secret_id, title, user_name, site, notes, user_id).execute(&mut *transaction).await.unwrap();
         sqlx::query!("INSERT INTO secret_share(id_secret_share, server_share, created_at, updated_at, id_secret) VALUES ($1, $2, $3, $4, $5)",
-                                server_share_id, server_share, now, now, new_secret_id).execute(database).await.unwrap();
+                                server_share_id, server_share, now, now, new_secret_id).execute(&mut *transaction).await.unwrap();
+        transaction.commit().await.unwrap();
         new_secret_id
     }
 
@@ -53,8 +55,10 @@ impl Secret {
         let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {
             Some(secret) => {
-                sqlx::query!("UPDATE secret set title = COALESCE($1,title), user_name = COALESCE($2,user_name), site = COALESCE($3,site), notes = COALESCE($4,notes) where id_secret = $5", title,user_name, site, notes, secret_id).execute(database).await.unwrap();
-                sqlx::query!("UPDATE secret_share set server_share = COALESCE($1,server_share) where id_secret = $2", server_share, secret_id).execute(database).await.unwrap();
+                let mut transaction = database.begin().await.unwrap();
+                sqlx::query!("UPDATE secret set title = COALESCE($1,title), user_name = COALESCE($2,user_name), site = COALESCE($3,site), notes = COALESCE($4,notes) where id_secret = $5", title,user_name, site, notes, secret_id).execute(&mut *transaction).await.unwrap();
+                sqlx::query!("UPDATE secret_share set server_share = COALESCE($1,server_share) where id_secret = $2", server_share, secret_id).execute(&mut *transaction).await.unwrap();
+                transaction.commit().await.unwrap();
                 Some(secret.id_secret)
             },
             None => None
@@ -65,9 +69,11 @@ impl Secret {
         let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {
             Some(secret) => {
-                sqlx::query!("DELETE from secret_share where id_secret = $1", secret_id).execute(database).await.unwrap();
-                sqlx::query!("DELETE from emergency_contact_secret_access where id_secret = $1", secret_id).execute(database).await.unwrap();
-                sqlx::query!("DELETE from secret where id_secret = $1", secret_id).execute(database).await.unwrap();
+                let mut transaction = database.begin().await.unwrap();
+                sqlx::query!("DELETE from secret_share where id_secret = $1", secret_id).execute(&mut *transaction).await.unwrap();
+                sqlx::query!("DELETE from emergency_contact_secret_access where id_secret = $1", secret_id).execute(&mut *transaction).await.unwrap();
+                sqlx::query!("DELETE from secret where id_secret = $1", secret_id).execute(&mut *transaction).await.unwrap();
+                transaction.commit().await.unwrap();
                 Some(secret.id_secret)
             },
             None => None
