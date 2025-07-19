@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize)]
 pub struct Secret {
     id_secret: Uuid,
-    title: String,
-    user_name: Option<String>,
-    site: Option<String>,
-    notes: Option<String>,
+    title: Vec<u8>,
+    user_name: Option<Vec<u8>>,
+    site: Option<Vec<u8>>,
+    notes: Option<Vec<u8>>,
 }
 #[derive(Deserialize, Serialize)]
 pub struct SecretShare {
-    server_share: String,
+    server_share: Vec<u8>,
     created_at: NaiveDateTime,
     updated_at: NaiveDateTime,
 }
@@ -29,10 +29,10 @@ impl Secret {
         sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where user_id = $1 and id_secret = $2", user_id,secret_id).fetch_optional(database).await.unwrap()
     }
 
-    pub async fn create_new_secret(title: &String, user_name: Option<&String>,
-                                   site: Option<&String>,
-                                   notes: Option<&String>,
-                                   server_share: &String,
+    pub async fn create_new_secret(title: &Vec<u8>, user_name: Option<&Vec<u8>>,
+                                   site: Option<&Vec<u8>>,
+                                   notes: Option<&Vec<u8>>,
+                                   server_share: &Vec<u8>,
                                    user_id: &Uuid,
                                    database: &PgPool) -> Uuid {
         let new_secret_id = Uuid::new_v4();
@@ -47,10 +47,10 @@ impl Secret {
         new_secret_id
     }
 
-    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid,title: Option<&String>, user_name: Option<&String>,
-                               site: Option<&String>,
-                               notes: Option<&String>,
-                               server_share: Option<&String>,
+    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid,title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
+                               site: Option<&Vec<u8>>,
+                               notes: Option<&Vec<u8>>,
+                               server_share: Option<&Vec<u8>>,
                                database: &PgPool) -> Option<Uuid> {
         let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {

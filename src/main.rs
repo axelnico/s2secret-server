@@ -71,7 +71,7 @@ where
                     let cose_message = CoseEncrypt0::from_slice(bytes.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
                     let nonce = cose_message.unprotected.iv;
                     let cbor_encrypted_payload = cose_message.ciphertext.unwrap_or_default();
-                    let decrypted_request_content = decrypt_using_nonce(&encryption_key,&cbor_encrypted_payload,&nonce).map_err(|_| StatusCode::BAD_REQUEST)?;
+                    let decrypted_request_content    = decrypt_using_nonce(&encryption_key,&cbor_encrypted_payload,&nonce).map_err(|_| StatusCode::BAD_REQUEST)?;
                     let value = ciborium::de::from_reader(Bytes::from(decrypted_request_content).as_ref())
                         .map_err(|_| StatusCode::BAD_REQUEST)?;
                     Ok(Cbor(value))
@@ -118,21 +118,21 @@ struct S2SecretCreateResponse {
     id_secret: Uuid
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug,Deserialize, Serialize)]
 struct NewSecretRequest {
-    title: String,
-    user_name: Option<String>,
-    site: Option<String>,
-    notes: Option<String>,
-    server_share: String,
+    title: Vec<u8>,
+    user_name: Option<Vec<u8>>,
+    site: Option<Vec<u8>>,
+    notes: Option<Vec<u8>>,
+    server_share: Vec<u8>,
 }
 #[derive(Deserialize, Serialize)]
 struct SecretPatchRequest {
-    title: Option<String>,
-    user_name: Option<String>,
-    site: Option<String>,
-    notes: Option<String>,
-    server_share: Option<String>,
+    title: Option<Vec<u8>>,
+    user_name: Option<Vec<u8>>,
+    site: Option<Vec<u8>>,
+    notes: Option<Vec<u8>>,
+    server_share: Option<Vec<u8>>,
 }
 #[derive(Deserialize, Serialize)]
 struct NewEmergencyContactRequest {
