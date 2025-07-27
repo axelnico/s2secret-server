@@ -47,17 +47,35 @@ impl Secret {
         new_secret_id
     }
 
-    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid,title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
-                               site: Option<&Vec<u8>>,
-                               notes: Option<&Vec<u8>>,
-                               server_share: Option<&Vec<u8>>,
-                               database: &PgPool) -> Option<Uuid> {
+    pub async fn partially_modify_secret(secret_id: &Uuid, user_id: &Uuid, title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
+                                         site: Option<&Vec<u8>>,
+                                         notes: Option<&Vec<u8>>,
+                                         server_share: Option<&Vec<u8>>,
+                                         database: &PgPool) -> Option<Uuid> {
         let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
         match secret {
             Some(secret) => {
                 let mut transaction = database.begin().await.unwrap();
                 sqlx::query!("UPDATE secret set title = COALESCE($1,title), user_name = COALESCE($2,user_name), site = COALESCE($3,site), notes = COALESCE($4,notes) where id_secret = $5", title,user_name, site, notes, secret_id).execute(&mut *transaction).await.unwrap();
                 sqlx::query!("UPDATE secret_share set server_share = COALESCE($1,server_share) where id_secret = $2", server_share, secret_id).execute(&mut *transaction).await.unwrap();
+                transaction.commit().await.unwrap();
+                Some(secret.id_secret)
+            },
+            None => None
+        }
+    }
+
+    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid, title: &Vec<u8>, user_name: Option<&Vec<u8>>,
+                                         site: Option<&Vec<u8>>,
+                                         notes: Option<&Vec<u8>>,
+                                         server_share: &Vec<u8>,
+                                         database: &PgPool) -> Option<Uuid> {
+        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
+        match secret {
+            Some(secret) => {
+                let mut transaction = database.begin().await.unwrap();
+                sqlx::query!("UPDATE secret set title = $1, user_name = $2, site = $3, notes = $4 where id_secret = $5", title,user_name, site, notes, secret_id).execute(&mut *transaction).await.unwrap();
+                sqlx::query!("UPDATE secret_share set server_share = $1 where id_secret = $2", server_share, secret_id).execute(&mut *transaction).await.unwrap();
                 transaction.commit().await.unwrap();
                 Some(secret.id_secret)
             },

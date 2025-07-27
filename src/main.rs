@@ -114,12 +114,12 @@ struct S2SecretError<'a> {
 }
 
 #[derive(Serialize)]
-struct S2SecretCreateResponse {
+struct S2SecretUpsertResponse {
     id_secret: Uuid
 }
 
 #[derive(Debug,Deserialize, Serialize)]
-struct NewSecretRequest {
+struct SecretUpsertRequest {
     title: Vec<u8>,
     user_name: Option<Vec<u8>>,
     site: Option<Vec<u8>>,
@@ -278,7 +278,8 @@ async fn main() -> anyhow::Result<()> {
     let protected_routes = Router::new()
         .route("/secrets", get(secrets_descriptive_data).post(add_new_secret))
         .route("/secrets/{secret_id}", get(secret_descriptive_data)
-            .patch(modify_secret)
+            .patch(partially_modify_secret)
+            .put(modify_secret)
             .delete(delete_secret))
         .route("/secrets/{secret_id}/share", get(secret_share))
         .route("/secrets/{secret_id}/emergency-contacts",
@@ -334,18 +335,18 @@ async fn secret_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool
     }
 }
 
-async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Cbor<SecretPatchRequest>) -> impl IntoResponse {
-    let modified_secret_id = Secret::modify_secret(&secret_id,
-                                                   &auth.id,
-                                                   secret_update_request.0.title.as_ref(),
-                                                   secret_update_request.0.user_name.as_ref(),
-                                                   secret_update_request.0.site.as_ref(),
-                                                   secret_update_request.0.notes.as_ref(),
-                                                   secret_update_request.0.server_share.as_ref(),
-                                                   &s2secret_state.database_pool).await;
+async fn partially_modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Cbor<SecretPatchRequest>) -> impl IntoResponse {
+    let modified_secret_id = Secret::partially_modify_secret(&secret_id,
+                                                             &auth.id,
+                                                             secret_update_request.0.title.as_ref(),
+                                                             secret_update_request.0.user_name.as_ref(),
+                                                             secret_update_request.0.site.as_ref(),
+                                                             secret_update_request.0.notes.as_ref(),
+                                                             secret_update_request.0.server_share.as_ref(),
+                                                             &s2secret_state.database_pool).await;
 
     match modified_secret_id {
-        Some(modified_secret_id) => Cbor(S2SecretCreateResponse { id_secret: modified_secret_id  }).into_response(),
+        Some(modified_secret_id) => Cbor(S2SecretUpsertResponse { id_secret: modified_secret_id  }).into_response(),
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
@@ -364,7 +365,7 @@ async fn secret_share(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, 
     }
 }
 
-async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Cbor<NewSecretRequest>) -> impl IntoResponse {
+async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Cbor<SecretUpsertRequest>) -> impl IntoResponse {
     let new_secret_uuid = Secret::create_new_secret(&secret_request.0.title,
                               secret_request.0.user_name.as_ref(),
                               secret_request.0.site.as_ref(),
@@ -373,7 +374,23 @@ async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>
                               &auth.id,
                               &s2secret_state.database_pool
     ).await;
-    (StatusCode::CREATED, Cbor(S2SecretCreateResponse { id_secret: new_secret_uuid  }))
+    (StatusCode::CREATED, Cbor(S2SecretUpsertResponse { id_secret: new_secret_uuid  }))
+}
+
+async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>,Path(secret_id): Path<Uuid>, secret_request: Cbor<SecretUpsertRequest>) -> impl IntoResponse {
+    let modified_secret_id = Secret::modify_secret(&secret_id,
+                                                             &auth.id,
+                                                             secret_request.0.title.as_ref(),
+                                                             secret_request.0.user_name.as_ref(),
+                                                             secret_request.0.site.as_ref(),
+                                                             secret_request.0.notes.as_ref(),
+                                                             secret_request.0.server_share.as_ref(),
+                                                             &s2secret_state.database_pool).await;
+
+    match modified_secret_id {
+        Some(modified_secret_id) => Cbor(S2SecretUpsertResponse { id_secret: modified_secret_id  }).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
+    }
 }
 
 async fn secret_emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> Cbor<Vec<EmergencyContact>> {
