@@ -11,7 +11,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{EmergencyContact, Secret, SecretShare, User};
+use s2secret_service::{EmergencyContact, Secret, SecretShare, ShareRenewal, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
@@ -25,6 +25,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
 use coset::{AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder, HeaderBuilder};
+use sharks::Share;
+use sqlx::types::chrono::NaiveDateTime;
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -282,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
             .put(modify_secret)
             .delete(delete_secret))
         .route("/secrets/{secret_id}/share", get(secret_share))
+        .route("/secrets/{secret_id}/renew-share", post(secret_share_renewal))
         .route("/secrets/{secret_id}/emergency-contacts",
                get(secret_emergency_contacts)
                    .post(add_emergency_contact_to_secret))
@@ -361,6 +364,14 @@ async fn secret_share(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, 
     let secret_share = SecretShare::secret_share(&secret_id,&auth.id, &s2secret_state.database_pool).await;
     match secret_share {
         Some(secret_share) => Cbor(secret_share).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
+    }
+}
+
+async fn secret_share_renewal(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, renewal_share: Cbor<ShareRenewal>) -> impl IntoResponse {
+    let client_share_renewal = SecretShare::renew_secret_share(&secret_id,&auth.id, &Share::try_from(renewal_share.0.share.as_slice()).ok().unwrap(),&s2secret_state.database_pool).await;
+    match client_share_renewal {
+        Some(client_share_renewal) => Cbor(client_share_renewal).into_response(),
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }

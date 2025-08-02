@@ -3,6 +3,7 @@ use chrono::{NaiveDateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use sharks::{Share, Sharks};
 
 #[derive(Deserialize, Serialize)]
 pub struct Secret {
@@ -11,7 +12,16 @@ pub struct Secret {
     user_name: Option<Vec<u8>>,
     site: Option<Vec<u8>>,
     notes: Option<Vec<u8>>,
+    share_updated_at: NaiveDateTime,
+    next_share_update: Option<NaiveDateTime>,
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct ShareRenewal {
+    pub share: Vec<u8>,
+    updated_at: NaiveDateTime
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct SecretShare {
     server_share: Vec<u8>,
@@ -22,11 +32,20 @@ pub struct SecretShare {
 impl Secret {
 
     pub async fn descriptive_data_of_all_secrets(database: &PgPool, user_id: &Uuid) -> Vec<Self> {
-        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where user_id = $1", user_id).fetch_all(database).await.unwrap()
+        sqlx::query_as!(Self, "SELECT s.id_secret,s.title,s.user_name,s.site,s.notes, ss.updated_at as share_updated_at, (ss.updated_at + pp.protection_interval ) as next_share_update
+                                        from secret s
+                                        inner join secret_share ss on s.id_secret = ss.id_secret 
+                                        left join proactive_protection pp on pp.id_proactive_protection = ss.proactive_protection_id 
+                                        where s.user_id = $1", user_id).fetch_all(database).await.unwrap()
     }
 
     pub async fn descriptive_data_of_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
-        sqlx::query_as!(Self, "SELECT id_secret,title,user_name,site,notes from secret where user_id = $1 and id_secret = $2", user_id,secret_id).fetch_optional(database).await.unwrap()
+        sqlx::query_as!(Self, "SELECT s.id_secret,s.title,s.user_name,s.site,s.notes, ss.updated_at as share_updated_at, (ss.updated_at + pp.protection_interval ) as next_share_update
+                                        from secret s
+                                        inner join secret_share ss on s.id_secret = ss.id_secret 
+                                        left join proactive_protection pp on pp.id_proactive_protection = ss.proactive_protection_id 
+                                        where s.user_id = $1
+                                        and s.id_secret = $2", user_id,secret_id).fetch_optional(database).await.unwrap()
     }
 
     pub async fn create_new_secret(title: &Vec<u8>, user_name: Option<&Vec<u8>>,
@@ -103,5 +122,22 @@ impl SecretShare {
 
     pub async fn secret_share(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
         sqlx::query_as!(Self, "SELECT server_share, created_at, updated_at from secret_share sh inner join secret s on s.id_secret = sh.id_secret where s.id_secret = $1 and s.user_id = $2", secret_id, user_id).fetch_optional(database).await.unwrap()
+    }
+    
+    pub async fn renew_secret_share(secret_id: &Uuid, user_id: &Uuid, renewal_share_from_client: &Share, database: &PgPool) -> Option<ShareRenewal> {
+        let mut transaction = database.begin().await.unwrap();
+        let secret_share = Self::secret_share(secret_id,user_id,database).await;
+        match secret_share {
+            Some(secret_share) => {
+                let mut server_share = Share::try_from(secret_share.server_share.as_slice()).ok().unwrap();
+                let sharks = Sharks(2);
+                let server_renewal_shares: Vec<Share> = sharks.proactive_dealer(&server_share).take(2).collect();
+                server_share.renew([renewal_share_from_client, &server_renewal_shares[1]]).ok();
+                let new_server_share = sqlx::query!("UPDATE secret_share set server_share = $1 where id_secret = $2 returning updated_at", Vec::from(&server_share), secret_id).fetch_one(&mut *transaction).await.unwrap();
+                transaction.commit().await.unwrap();
+                Some( ShareRenewal { share: Vec::from(&server_renewal_shares[0]), updated_at: new_server_share.updated_at })
+            },
+            None => None,
+        }
     }
 }

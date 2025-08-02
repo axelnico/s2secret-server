@@ -4,5 +4,6 @@ mod user;
 
 pub use secrets::Secret;
 pub use secrets::SecretShare;
+pub use secrets::ShareRenewal;
 pub use emergency_contacts::EmergencyContact;
 pub use user::User;
