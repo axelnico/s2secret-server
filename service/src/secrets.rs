@@ -12,7 +12,8 @@ pub struct Secret {
     user_name: Option<Vec<u8>>,
     site: Option<Vec<u8>>,
     notes: Option<Vec<u8>>,
-    share_updated_at: NaiveDateTime,
+    share_updated_at: Option<NaiveDateTime>,
+    //proactive_protection: Option<String>,
     next_share_update: Option<NaiveDateTime>,
 }
 
@@ -27,6 +28,20 @@ pub struct SecretShare {
     server_share: Vec<u8>,
     created_at: NaiveDateTime,
     updated_at: NaiveDateTime,
+}
+#[derive(Deserialize, Serialize)]
+pub enum ProactiveProtection {
+    Medium,
+    High,
+    Extreme
+}
+
+fn proactive_protection_to_string(proactive_protection: ProactiveProtection) -> String {
+    match proactive_protection {
+        ProactiveProtection::Medium => "Medium".to_string(),
+        ProactiveProtection::High => "High".to_string(),
+        ProactiveProtection::Extreme => "Extreme".to_string(),
+    }
 }
 
 impl Secret {
@@ -136,6 +151,33 @@ impl SecretShare {
                 let new_server_share = sqlx::query!("UPDATE secret_share set server_share = $1 where id_secret = $2 returning updated_at", Vec::from(&server_share), secret_id).fetch_one(&mut *transaction).await.unwrap();
                 transaction.commit().await.unwrap();
                 Some( ShareRenewal { share: Vec::from(&server_renewal_shares[0]), updated_at: new_server_share.updated_at })
+            },
+            None => None,
+        }
+    }
+    
+    pub async fn enable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, proactive_protection: ProactiveProtection, database: &PgPool) -> Option<Uuid> {
+        let mut transaction = database.begin().await.unwrap();
+        let secret_share = Self::secret_share(secret_id,user_id,database).await;
+        match secret_share {
+            Some(_) => {
+                let proactive_protection = sqlx::query!("SELECT id_proactive_protection from proactive_protection where description = $1",proactive_protection_to_string(proactive_protection)).fetch_one(&mut *transaction).await.unwrap();
+                sqlx::query!("UPDATE secret_share set proactive_protection_id = $1 where id_secret = $2",proactive_protection.id_proactive_protection,secret_id).execute(& mut * transaction).await.unwrap();
+                transaction.commit().await.unwrap();
+                Some(proactive_protection.id_proactive_protection)
+            },
+            None => None,
+        }
+    }
+
+    pub async fn disable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<()> {
+        let mut transaction = database.begin().await.unwrap();
+        let secret_share = Self::secret_share(secret_id,user_id,database).await;
+        match secret_share {
+            Some(_) => {
+                sqlx::query!("UPDATE secret_share set proactive_protection_id = null where id_secret = $1",secret_id).execute(& mut * transaction).await.unwrap();
+                transaction.commit().await.unwrap();
+                Some(())
             },
             None => None,
         }

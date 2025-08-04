@@ -11,7 +11,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{EmergencyContact, Secret, SecretShare, ShareRenewal, User};
+use s2secret_service::{EmergencyContact, ProactiveProtection, Secret, SecretShare, ShareRenewal, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
@@ -284,6 +284,8 @@ async fn main() -> anyhow::Result<()> {
             .put(modify_secret)
             .delete(delete_secret))
         .route("/secrets/{secret_id}/share", get(secret_share))
+        .route("/secrets/{secret_id}/enable-proactive-protection", post(enable_proactive_protection))
+        .route("/secrets/{secret_id}/disable_proactive_protection", post(disable_proactive_protection))
         .route("/secrets/{secret_id}/renew-share", post(secret_share_renewal))
         .route("/secrets/{secret_id}/emergency-contacts",
                get(secret_emergency_contacts)
@@ -372,6 +374,22 @@ async fn secret_share_renewal(auth: AuthSession<AuthUser, Uuid, SessionPgPool, P
     let client_share_renewal = SecretShare::renew_secret_share(&secret_id,&auth.id, &Share::try_from(renewal_share.0.share.as_slice()).ok().unwrap(),&s2secret_state.database_pool).await;
     match client_share_renewal {
         Some(client_share_renewal) => Cbor(client_share_renewal).into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
+    }
+}
+
+async fn enable_proactive_protection(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, requested_protection: Cbor<ProactiveProtection>) -> impl IntoResponse {
+    let protection_enabled = SecretShare::enable_proactive_protection(&secret_id,&auth.id,requested_protection.0,&s2secret_state.database_pool).await;
+    match protection_enabled {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
+    }
+}
+
+async fn disable_proactive_protection(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
+    let protection_enabled = SecretShare::disable_proactive_protection(&secret_id,&auth.id,&s2secret_state.database_pool).await;
+    match protection_enabled {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
     }
 }
