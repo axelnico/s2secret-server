@@ -285,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
             .delete(delete_secret))
         .route("/secrets/{secret_id}/share", get(secret_share))
         .route("/secrets/{secret_id}/enable-proactive-protection", post(enable_proactive_protection))
-        .route("/secrets/{secret_id}/disable_proactive_protection", post(disable_proactive_protection))
+        .route("/secrets/{secret_id}/disable-proactive-protection", post(disable_proactive_protection))
         .route("/secrets/{secret_id}/renew-share", post(secret_share_renewal))
         .route("/secrets/{secret_id}/emergency-contacts",
                get(secret_emergency_contacts)
