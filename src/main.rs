@@ -11,7 +11,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{EmergencyContact, ProactiveProtection, Secret, SecretShare, ShareRenewal, User};
+use s2secret_service::{EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
@@ -25,7 +25,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
 use coset::{AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder, HeaderBuilder};
-use sharks::Share;
+use sharks::{Share, Sharks};
+use hmac_sha512::HMAC;
 use sqlx::types::chrono::NaiveDateTime;
 
 // Ciphersuite to be used in the OPAQUE protocol
@@ -120,6 +121,11 @@ struct S2SecretUpsertResponse {
     id_secret: Uuid
 }
 
+#[derive(Serialize)]
+struct EmergencyContactUpsertResponse {
+    id_emergency_contact: Uuid
+}
+
 #[derive(Debug,Deserialize, Serialize)]
 struct SecretUpsertRequest {
     title: Vec<u8>,
@@ -139,17 +145,17 @@ struct SecretPatchRequest {
 #[derive(Deserialize, Serialize)]
 struct NewEmergencyContactRequest {
     email: String,
-    description: String,
-    server_key_file: String,
-    server_share: String
+    description: Option<String>,
+    server_key_file: Vec<u8>,
+    server_share: Vec<u8>
 }
 
 #[derive(Deserialize)]
 struct EmergencyAccessRequest {
     id_emergency_contact: Uuid,
-    server_ticket: String,
-    server_v: String,
-    server_a: String
+    server_ticket: Vec<u8>,
+    server_v: Vec<u8>,
+    server_a: Vec<u8>
 }
 
 #[derive(Deserialize)]
@@ -329,11 +335,11 @@ async fn health_check() -> &'static str {
 }
 
 async fn secrets_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>) -> Cbor<Vec<Secret>> {
-    Cbor(Secret::descriptive_data_of_all_secrets(&s2secret_state.database_pool, &auth.id).await)
+    Cbor(Secret::descriptive_data_of_all_secrets_and_user(&s2secret_state.database_pool, &auth.id).await)
 }
 
 async fn secret_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>) -> impl IntoResponse {
-    let secret_descriptive_data = Secret::descriptive_data_of_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
+    let secret_descriptive_data = Secret::descriptive_data_of_secret_and_user(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match secret_descriptive_data {
         Some(secret) => Cbor(secret).into_response(),
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
@@ -341,14 +347,14 @@ async fn secret_descriptive_data(auth: AuthSession<AuthUser, Uuid, SessionPgPool
 }
 
 async fn partially_modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, secret_update_request: Cbor<SecretPatchRequest>) -> impl IntoResponse {
-    let modified_secret_id = Secret::partially_modify_secret(&secret_id,
-                                                             &auth.id,
-                                                             secret_update_request.0.title.as_ref(),
-                                                             secret_update_request.0.user_name.as_ref(),
-                                                             secret_update_request.0.site.as_ref(),
-                                                             secret_update_request.0.notes.as_ref(),
-                                                             secret_update_request.0.server_share.as_ref(),
-                                                             &s2secret_state.database_pool).await;
+    let modified_secret_id = Secret::partially_modify_secret_for_user(&secret_id,
+                                                                      &auth.id,
+                                                                      secret_update_request.0.title.as_ref(),
+                                                                      secret_update_request.0.user_name.as_ref(),
+                                                                      secret_update_request.0.site.as_ref(),
+                                                                      secret_update_request.0.notes.as_ref(),
+                                                                      secret_update_request.0.server_share.as_ref(),
+                                                                      &s2secret_state.database_pool).await;
 
     match modified_secret_id {
         Some(modified_secret_id) => Cbor(S2SecretUpsertResponse { id_secret: modified_secret_id  }).into_response(),
@@ -356,7 +362,7 @@ async fn partially_modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool
     }
 }
 async fn delete_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
-    let deleted_secret_id = Secret::delete_secret(&secret_id, &auth.id, &s2secret_state.database_pool).await;
+    let deleted_secret_id = Secret::delete_secret_of_user(&secret_id, &auth.id, &s2secret_state.database_pool).await;
     match deleted_secret_id {
         Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Secret not found"})).into_response()
@@ -395,26 +401,26 @@ async fn disable_proactive_protection(auth: AuthSession<AuthUser, Uuid, SessionP
 }
 
 async fn add_new_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, secret_request: Cbor<SecretUpsertRequest>) -> impl IntoResponse {
-    let new_secret_uuid = Secret::create_new_secret(&secret_request.0.title,
-                              secret_request.0.user_name.as_ref(),
-                              secret_request.0.site.as_ref(),
-                              secret_request.0.notes.as_ref(),
-                              &secret_request.0.server_share,
-                              &auth.id,
-                              &s2secret_state.database_pool
+    let new_secret_uuid = Secret::create_new_secret_for_user(&secret_request.0.title,
+                                                             secret_request.0.user_name.as_ref(),
+                                                             secret_request.0.site.as_ref(),
+                                                             secret_request.0.notes.as_ref(),
+                                                             &secret_request.0.server_share,
+                                                             &auth.id,
+                                                             &s2secret_state.database_pool
     ).await;
     (StatusCode::CREATED, Cbor(S2SecretUpsertResponse { id_secret: new_secret_uuid  }))
 }
 
 async fn modify_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>,Path(secret_id): Path<Uuid>, secret_request: Cbor<SecretUpsertRequest>) -> impl IntoResponse {
-    let modified_secret_id = Secret::modify_secret(&secret_id,
-                                                             &auth.id,
-                                                             secret_request.0.title.as_ref(),
-                                                             secret_request.0.user_name.as_ref(),
-                                                             secret_request.0.site.as_ref(),
-                                                             secret_request.0.notes.as_ref(),
-                                                             secret_request.0.server_share.as_ref(),
-                                                             &s2secret_state.database_pool).await;
+    let modified_secret_id = Secret::modify_secret_of_user(&secret_id,
+                                                           &auth.id,
+                                                           secret_request.0.title.as_ref(),
+                                                           secret_request.0.user_name.as_ref(),
+                                                           secret_request.0.site.as_ref(),
+                                                           secret_request.0.notes.as_ref(),
+                                                           secret_request.0.server_share.as_ref(),
+                                                           &s2secret_state.database_pool).await;
 
     match modified_secret_id {
         Some(modified_secret_id) => Cbor(S2SecretUpsertResponse { id_secret: modified_secret_id  }).into_response(),
@@ -427,7 +433,7 @@ async fn secret_emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPo
 }
 
 async fn add_emergency_contact_to_secret(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, emergency_access_request: Cbor<EmergencyAccessRequest>) -> impl IntoResponse {
-    let emergency_contact_uuid = EmergencyContact::add_emergency_contact_to_secret(&secret_id,
+    let emergency_contact_uuid = EmergencyContactSecretAccess::add_emergency_contact_to_secret(&secret_id,
                                                                                    &emergency_access_request.0.id_emergency_contact,
                                                                                    &auth.id,
                                                                                    &emergency_access_request.0.server_ticket,
@@ -459,16 +465,27 @@ async fn emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgP
     Cbor(EmergencyContact::emergency_contacts(&s2secret_state.database_pool,&auth.id).await)
 }
 
-async fn create_emergency_contact(s2secret_state: State<AppState>, emergency_contact_request: Cbor<NewEmergencyContactRequest>) -> impl IntoResponse {
-    "TODO: create new emergency contact for current user"
+async fn create_emergency_contact(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, emergency_contact_request: Cbor<NewEmergencyContactRequest>) -> impl IntoResponse {
+    let new_emergency_contact_uuid = EmergencyContact::add_emergency_contact_for_user(&emergency_contact_request.0.email,
+                                                             emergency_contact_request.0.description.as_ref(), 
+                                                                                      &emergency_contact_request.0.server_key_file, 
+                                                                                      &emergency_contact_request.0.server_share,
+                                                             &auth.id,
+                                                             &s2secret_state.database_pool
+    ).await;
+    (StatusCode::CREATED, Cbor(EmergencyContactUpsertResponse { id_emergency_contact: new_emergency_contact_uuid  }))
 }
 
 async fn update_emergency_contact() -> &'static str {
     "TODO: update the entire information of an emergency contact"
 }
 
-async fn delete_emergency_contact() -> &'static str {
-    "TODO: delete an emergency contact of current user"
+async fn delete_emergency_contact(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(emergency_contact_id): Path<Uuid>,s2secret_state: State<AppState>) -> impl IntoResponse {
+    let deleted_emergency_contact_id = EmergencyContact::delete_emergency_contact(&emergency_contact_id, &auth.id, &s2secret_state.database_pool).await;
+    match deleted_emergency_contact_id {
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Emergency contact not found"})).into_response()
+    }
 }
 
 async fn user_registration_start(s2secret_state: State<AppState>,session: SessionPgSession, user_init_registration_request: Cbor<UserRegistrationRequest>) -> impl IntoResponse {
@@ -554,4 +571,63 @@ async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {
         ClientRegistration::<DefaultCipherSuite>::start(&mut client_rng, b"password").unwrap();
 
     Cbor(client_registration_start_result.message)
+}
+
+#[derive(Debug,Deserialize, Serialize)]
+struct EmergencyContactSecretAccessRequest {
+    password_hash: Vec<u8>,
+    //one_time_pad: Vec<u8>, TODO: sending the one time pad in clear does not add any protection. Should be encrypted with server public key
+    contact_prover_mac: Vec<u8>,
+    contact_ticket_share: Vec<u8>,
+    contact_prover_mac_share: Vec<u8>,
+}
+
+#[derive(Debug,Deserialize, Serialize)]
+struct EmergencyContactSecretAccessResponse {
+    title: Vec<u8>,
+    encrypted_secret: Vec<u8>,
+    user_name: Option<Vec<u8>>,
+    site: Option<Vec<u8>>,
+    notes: Option<Vec<u8>>,
+    server_key_file: Vec<u8>,
+    server_v: Vec<u8>
+}
+
+async fn emergency_access(s2secret_state: State<AppState>,Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>, emergency_access_request: Cbor<EmergencyContactSecretAccessRequest>) -> impl IntoResponse {
+    let emergency_contact_secret_access_data = EmergencyContactSecretAccess::emergency_access_for_contact_and_secret(&secret_id,&emergency_contact_id,&s2secret_state.database_pool).await;
+    match emergency_contact_secret_access_data {
+        Some(emergency_contact_secret_access_data) => {
+            let sharks = Sharks(2);
+            let server_ticket_share = Share::try_from(emergency_contact_secret_access_data.server_ticket.as_slice()).ok().unwrap();
+            let contact_ticket_share = Share::try_from(emergency_access_request.0.contact_ticket_share.as_slice()).ok().unwrap();
+            let ticket = sharks.recover([&server_ticket_share,&contact_ticket_share]).ok().unwrap();
+            let ticket = Ticket::deserialize(&ticket).ok().unwrap();
+            // TODO: if ticket cannot be recovered return error
+            let contact_prover_mac_share = Share::try_from(emergency_access_request.0.contact_prover_mac_share.as_slice()).ok().unwrap();
+            let server_mac_share = Share::try_from(emergency_contact_secret_access_data.server_a.as_slice()).ok().unwrap();
+            let recovered_mac = sharks.recover([&contact_prover_mac_share,&server_mac_share]).ok().unwrap();
+            let is_valid = HMAC::verify([emergency_access_request.0.password_hash,emergency_access_request.0.contact_ticket_share].concat(), recovered_mac, <&[u8; 64]>::try_from(emergency_access_request.0.contact_prover_mac.as_slice()).unwrap());
+            if !is_valid {
+                return (StatusCode::UNAUTHORIZED).into_response();
+            }
+            if emergency_access_request.0.password_hash != ticket.password_hash {
+                // TODO: use a counter increment to prevent online brute force attack to password
+                // TODO: also use hashing server side, as client side hashing alone is not secure. Not too critical as server hash is not stored directly 
+                return (StatusCode::UNAUTHORIZED).into_response();
+            }
+            // TODO: send a one time code to emergency contact email
+            let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
+            let emergency_contact_data = EmergencyContact::emergency_contact_data(&emergency_contact_id,&s2secret_state.database_pool).await.unwrap();
+            Cbor(EmergencyContactSecretAccessResponse {
+                title: secret.title,
+                encrypted_secret: ticket.encrypted_secret,
+                user_name: secret.user_name,
+                site: secret.site,
+                notes: secret.notes,
+                server_key_file: emergency_contact_data.server_key_file,
+                server_v: emergency_contact_secret_access_data.server_v
+            }).into_response()
+        },
+        None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Emergency access not found"})).into_response()
+    }
 }

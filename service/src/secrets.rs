@@ -8,10 +8,10 @@ use sharks::{Share, Sharks};
 #[derive(Deserialize, Serialize)]
 pub struct Secret {
     id_secret: Uuid,
-    title: Vec<u8>,
-    user_name: Option<Vec<u8>>,
-    site: Option<Vec<u8>>,
-    notes: Option<Vec<u8>>,
+    pub title: Vec<u8>,
+    pub user_name: Option<Vec<u8>>,
+    pub site: Option<Vec<u8>>,
+    pub notes: Option<Vec<u8>>,
     share_updated_at: Option<NaiveDateTime>,
     next_share_update: Option<NaiveDateTime>,
     proactive_protection: Option<String>,
@@ -46,7 +46,7 @@ fn proactive_protection_to_string(proactive_protection: ProactiveProtection) -> 
 
 impl Secret {
 
-    pub async fn descriptive_data_of_all_secrets(database: &PgPool, user_id: &Uuid) -> Vec<Self> {
+    pub async fn descriptive_data_of_all_secrets_and_user(database: &PgPool, user_id: &Uuid) -> Vec<Self> {
         sqlx::query_as!(Self, r#"SELECT s.id_secret,s.title,s.user_name,s.site,s.notes, ss.updated_at as share_updated_at, (ss.updated_at + pp.protection_interval ) as next_share_update, pp.description as "proactive_protection?"
                                         from secret s
                                         inner join secret_share ss on s.id_secret = ss.id_secret 
@@ -54,7 +54,7 @@ impl Secret {
                                         where s.user_id = $1"#, user_id).fetch_all(database).await.unwrap()
     }
 
-    pub async fn descriptive_data_of_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
+    pub async fn descriptive_data_of_secret_and_user(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Self> {
         sqlx::query_as!(Self, r#"SELECT s.id_secret,s.title,s.user_name,s.site,s.notes, ss.updated_at as share_updated_at, (ss.updated_at + pp.protection_interval ) as next_share_update, pp.description as "proactive_protection?"
                                         from secret s
                                         inner join secret_share ss on s.id_secret = ss.id_secret 
@@ -62,13 +62,21 @@ impl Secret {
                                         where s.user_id = $1
                                         and s.id_secret = $2"#, user_id,secret_id).fetch_optional(database).await.unwrap()
     }
+    
+    pub async fn descriptive_data_of_secret(secret_id: &Uuid, database: &PgPool) -> Option<Self> {
+        sqlx::query_as!(Self, r#"SELECT s.id_secret,s.title,s.user_name,s.site,s.notes, ss.updated_at as share_updated_at, (ss.updated_at + pp.protection_interval ) as next_share_update, pp.description as "proactive_protection?"
+                                        from secret s
+                                        inner join secret_share ss on s.id_secret = ss.id_secret 
+                                        left join proactive_protection pp on pp.id_proactive_protection = ss.proactive_protection_id 
+                                        where s.id_secret = $1"#, secret_id).fetch_optional(database).await.unwrap()
+    }
 
-    pub async fn create_new_secret(title: &Vec<u8>, user_name: Option<&Vec<u8>>,
-                                   site: Option<&Vec<u8>>,
-                                   notes: Option<&Vec<u8>>,
-                                   server_share: &Vec<u8>,
-                                   user_id: &Uuid,
-                                   database: &PgPool) -> Uuid {
+    pub async fn create_new_secret_for_user(title: &Vec<u8>, user_name: Option<&Vec<u8>>,
+                                            site: Option<&Vec<u8>>,
+                                            notes: Option<&Vec<u8>>,
+                                            server_share: &Vec<u8>,
+                                            user_id: &Uuid,
+                                            database: &PgPool) -> Uuid {
         let new_secret_id = Uuid::new_v4();
         let server_share_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
@@ -81,12 +89,12 @@ impl Secret {
         new_secret_id
     }
 
-    pub async fn partially_modify_secret(secret_id: &Uuid, user_id: &Uuid, title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
-                                         site: Option<&Vec<u8>>,
-                                         notes: Option<&Vec<u8>>,
-                                         server_share: Option<&Vec<u8>>,
-                                         database: &PgPool) -> Option<Uuid> {
-        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
+    pub async fn partially_modify_secret_for_user(secret_id: &Uuid, user_id: &Uuid, title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
+                                                  site: Option<&Vec<u8>>,
+                                                  notes: Option<&Vec<u8>>,
+                                                  server_share: Option<&Vec<u8>>,
+                                                  database: &PgPool) -> Option<Uuid> {
+        let secret = Self::descriptive_data_of_secret_and_user(secret_id, user_id, database).await;
         match secret {
             Some(secret) => {
                 let mut transaction = database.begin().await.unwrap();
@@ -99,12 +107,12 @@ impl Secret {
         }
     }
 
-    pub async fn modify_secret(secret_id: &Uuid, user_id: &Uuid, title: &Vec<u8>, user_name: Option<&Vec<u8>>,
-                                         site: Option<&Vec<u8>>,
-                                         notes: Option<&Vec<u8>>,
-                                         server_share: &Vec<u8>,
-                                         database: &PgPool) -> Option<Uuid> {
-        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
+    pub async fn modify_secret_of_user(secret_id: &Uuid, user_id: &Uuid, title: &Vec<u8>, user_name: Option<&Vec<u8>>,
+                                       site: Option<&Vec<u8>>,
+                                       notes: Option<&Vec<u8>>,
+                                       server_share: &Vec<u8>,
+                                       database: &PgPool) -> Option<Uuid> {
+        let secret = Self::descriptive_data_of_secret_and_user(secret_id, user_id, database).await;
         match secret {
             Some(secret) => {
                 let mut transaction = database.begin().await.unwrap();
@@ -117,8 +125,8 @@ impl Secret {
         }
     }
 
-    pub async fn delete_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Uuid> {
-        let secret = Self::descriptive_data_of_secret(secret_id,user_id,database).await;
+    pub async fn delete_secret_of_user(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<Uuid> {
+        let secret = Self::descriptive_data_of_secret_and_user(secret_id, user_id, database).await;
         match secret {
             Some(secret) => {
                 let mut transaction = database.begin().await.unwrap();
