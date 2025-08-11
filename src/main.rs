@@ -28,6 +28,7 @@ use coset::{AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder, He
 use sharks::{Share, Sharks};
 use hmac_sha512::HMAC;
 use sqlx::types::chrono::NaiveDateTime;
+use bincode::{config, Decode, Encode};
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -575,7 +576,7 @@ async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {
 
 #[derive(Debug,Deserialize, Serialize)]
 struct EmergencyContactSecretAccessRequest {
-    password_hash: Vec<u8>,
+    password_hash: String,
     //one_time_pad: Vec<u8>, TODO: sending the one time pad in clear does not add any protection. Should be encrypted with server public key
     contact_prover_mac: Vec<u8>,
     contact_ticket_share: Vec<u8>,
@@ -601,12 +602,13 @@ async fn emergency_access(s2secret_state: State<AppState>,Path((secret_id,emerge
             let server_ticket_share = Share::try_from(emergency_contact_secret_access_data.server_ticket.as_slice()).ok().unwrap();
             let contact_ticket_share = Share::try_from(emergency_access_request.0.contact_ticket_share.as_slice()).ok().unwrap();
             let ticket = sharks.recover([&server_ticket_share,&contact_ticket_share]).ok().unwrap();
-            let ticket = Ticket::deserialize(&ticket).ok().unwrap();
+            let config = config::standard();
+            let (ticket, length) : (Ticket, usize) = bincode::decode_from_slice(&ticket,config).unwrap();
             // TODO: if ticket cannot be recovered return error
             let contact_prover_mac_share = Share::try_from(emergency_access_request.0.contact_prover_mac_share.as_slice()).ok().unwrap();
             let server_mac_share = Share::try_from(emergency_contact_secret_access_data.server_a.as_slice()).ok().unwrap();
             let recovered_mac = sharks.recover([&contact_prover_mac_share,&server_mac_share]).ok().unwrap();
-            let is_valid = HMAC::verify([emergency_access_request.0.password_hash,emergency_access_request.0.contact_ticket_share].concat(), recovered_mac, <&[u8; 64]>::try_from(emergency_access_request.0.contact_prover_mac.as_slice()).unwrap());
+            let is_valid = HMAC::verify([emergency_access_request.0.password_hash.as_bytes(),emergency_access_request.0.contact_ticket_share.as_slice()].concat(), recovered_mac, <&[u8; 64]>::try_from(emergency_access_request.0.contact_prover_mac.as_slice()).unwrap());
             if !is_valid {
                 return (StatusCode::UNAUTHORIZED).into_response();
             }

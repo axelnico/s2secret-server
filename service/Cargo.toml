@@ -11,3 +11,4 @@ serde = { version = "1.0.209", features = ["derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.9.0"
 sharks = { git = "https://github.com/axelnico/sharks.git", branch = "proactive-secret-sharing", features = ["proactive"] }
+bincode = { version = "2.0.1" }

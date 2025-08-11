@@ -28,3 +28,4 @@ coset = "0.3.8"
 aes-gcm = "0.10.3"
 sharks = { git = "https://github.com/axelnico/sharks.git", branch = "proactive-secret-sharing"}
 hmac-sha512 = "1.1.7"
+bincode = "2.0.1"

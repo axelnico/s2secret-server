@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
+use bincode::{Decode, Encode};
+
 #[derive(Deserialize, Serialize)]
 pub struct EmergencyContactSecretAccess {
     id_emergency_contact: Uuid,
@@ -10,9 +12,9 @@ pub struct EmergencyContactSecretAccess {
     pub server_a: Vec<u8>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Encode, Decode)]
 pub struct Ticket {
-    pub password_hash: Vec<u8>,
+    pub password_hash: String,
     pub encrypted_secret: Vec<u8>,
 }
 
