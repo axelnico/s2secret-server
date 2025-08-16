@@ -4,7 +4,7 @@ use uuid::Uuid;
 #[derive(Deserialize, Serialize)]
 pub struct EmergencyContact {
     id_emergency_contact: Uuid,
-    email: String,
+    pub email: String,
     description: Option<String>,
     pub server_key_file : Vec<u8>,
     server_share: Vec<u8>,

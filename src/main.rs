@@ -29,6 +29,12 @@ use sharks::{Share, Sharks};
 use hmac_sha512::HMAC;
 use sqlx::types::chrono::NaiveDateTime;
 use bincode::{config, Decode, Encode};
+use lettre::{Address, Message, SmtpTransport, Transport};
+use lettre::message::{Mailbox, MultiPart, SinglePart};
+use lettre::message::header::ContentType;
+use lettre::transport::smtp::authentication::Credentials;
+use rand::distr::Alphanumeric;
+use rand::Rng;
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -151,12 +157,27 @@ struct NewEmergencyContactRequest {
     server_share: Vec<u8>
 }
 
+#[derive(Deserialize, Serialize)]
+struct OneTimeSecretCodeRequest {
+    email: String,
+    secret_code: String,
+}
+
 #[derive(Deserialize)]
 struct EmergencyAccessRequest {
     id_emergency_contact: Uuid,
     server_ticket: Vec<u8>,
     server_v: Vec<u8>,
     server_a: Vec<u8>
+}
+
+#[derive(Deserialize)]
+struct EmergencyAccessClientDataRequest {
+    encrypted_data_encryption_key: Vec<u8>,
+    encrypted_ticket_share: Vec<u8>,
+    encrypted_v_share: Vec<u8>,
+    encrypted_a_share: Vec<u8>,
+    encrypted_a : Vec<u8>
 }
 
 #[derive(Deserialize)]
@@ -277,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/user/login", post(user_login_start))
         .route("/user/register-finalize", post(user_registration_finish))
         .route("/user/login-finalize", post(user_login_finish))
+        .route("/user/2fa", post(user_login_2fa))
         .layer(
             AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
                 .with_config(auth_config.clone()),
@@ -453,9 +475,18 @@ async fn remove_emergency_contact_from_secret(Path((secret_id,emergency_contact_
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn send_emergency_access_data_to_contact(Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>)
-                                               -> &'static str {
-    "TODO: Send required emergency access data to a contact"
+async fn send_emergency_access_data_to_contact(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>,s2secret_state: State<AppState>, emergency_data_access_to_be_sent: Cbor<EmergencyAccessClientDataRequest>)
+                                               -> impl IntoResponse {
+    EmergencyContactSecretAccess::send_emergency_access_data_to_emergency_contact(&secret_id,
+                                                                                  &emergency_contact_id,
+                                                                                  &auth.id,
+                                                                                  emergency_data_access_to_be_sent.0.encrypted_data_encryption_key,
+                                                                                  emergency_data_access_to_be_sent.0.encrypted_ticket_share,
+                                                                                  emergency_data_access_to_be_sent.0.encrypted_v_share,
+                                                                                  emergency_data_access_to_be_sent.0.encrypted_a_share,
+                                                                                  emergency_data_access_to_be_sent.0.encrypted_a,
+                                                                                  &s2secret_state.database_pool).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn user_data(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>) -> impl IntoResponse {
@@ -525,20 +556,69 @@ async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<Aut
     Cbor(server_login_start_result.message.serialize())
 }
 
+fn one_time_secret_code() -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(12)
+        .map(char::from)
+        .collect()
+}
+
 async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Cbor<UserLoginFinishRequest>) -> impl IntoResponse {
     let server_login_state: Vec<u8> = auth.session.get("login_start_state").unwrap();
     let server_login_state = ServerLogin::<DefaultCipherSuite>::deserialize(&server_login_state).unwrap();
     let server_login_finish_result = server_login_state.finish(user_login_request.0.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
-    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&user_login_request.0.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
-    auth.session.renew();
-    auth.login_user(logged_in_user_id);
     auth.session.set("session_key",server_login_finish_result.session_key);
+    let email_from = env::var("EMAIL_FROM").expect("EMAIL_FROM is not set in .env file");
+    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME is not set in .env file");
+    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD is not set in .env file");
+    let email_from = Address::try_from(email_from).unwrap();
+    let email_to = Address::try_from(String::from("s2secret.test@gmail.com")).unwrap();
+    let one_time_secret_code = one_time_secret_code();
+    let email = Message::builder()
+        .from(Mailbox::new(None,email_from))
+        .to(Mailbox::new(None, email_to))
+        .subject("S2Secret - One Time Secret Code")
+        .header(ContentType::TEXT_PLAIN)
+        .body(one_time_secret_code.clone())
+        .unwrap();
+
+    let creds = Credentials::new(smtp_username, smtp_password);
+
+    // Open a remote connection to gmail
+    let mailer = SmtpTransport::relay("smtp.gmail.com")
+        .unwrap()
+        .credentials(creds)
+        .build();
+
+    // Send the email
+    match mailer.send(&email) {
+        Ok(_) => println!("Email sent successfully!"),
+        Err(e) => panic!("Could not send email: {e:?}"),
+    }
+    
+    auth.session.set("one_time_secret_code", one_time_secret_code);
     (StatusCode::OK).into_response()
+}
+
+async fn user_login_2fa(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, secret_code_request: Cbor<OneTimeSecretCodeRequest>) -> impl IntoResponse {
+    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&secret_code_request.0.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let one_time_secret_code: String = auth.session.get_remove("one_time_secret_code").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    if one_time_secret_code != secret_code_request.0.secret_code {
+        StatusCode::UNAUTHORIZED.into_response()
+    } else {
+        auth.session.renew();
+        auth.login_user(logged_in_user_id);
+        (StatusCode::OK).into_response()
+    }
 }
 
 pub async fn auth_middleware(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, request: Request,next: Next) -> Result<Response, StatusCode> {
     if auth.is_authenticated() {
         auth.session.set_store(true);
+        if auth.session.get::<String>("one_time_secret_code").is_some() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         let encryption_key: Vec<u8> =  auth.session.get("session_key").ok_or(StatusCode::UNAUTHORIZED)?;
         let response = next.run(request).await;
         let (parts, body) = response.into_parts();
