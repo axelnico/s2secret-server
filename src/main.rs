@@ -133,6 +133,11 @@ struct EmergencyContactUpsertResponse {
     id_emergency_contact: Uuid
 }
 
+#[derive(Serialize)]
+struct S2SecretUserUpsertResponse {
+    id_user: Uuid
+}
+
 #[derive(Debug,Deserialize, Serialize)]
 struct SecretUpsertRequest {
     title: Vec<u8>,
@@ -531,8 +536,8 @@ async fn user_registration_start(s2secret_state: State<AppState>,session: Sessio
 
 async fn user_registration_finish(s2secret_state: State<AppState>,session: SessionPgSession, user_finish_registration_request: Cbor<UserRegistrationFinishResult>) -> impl IntoResponse {
     let password_file = ServerRegistration::<DefaultCipherSuite>::finish(user_finish_registration_request.0.message.clone());
-    User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.0.email, &user_finish_registration_request.0.name, &*password_file.serialize(), &*s2secret_state.opaque_ciphersuite.serialize()).await;
-    (StatusCode::CREATED).into_response()
+    let user_created_id = User::create_new_user(&s2secret_state.database_pool, &user_finish_registration_request.0.email, &user_finish_registration_request.0.name, &*password_file.serialize(), &*s2secret_state.opaque_ciphersuite.serialize()).await;
+    (StatusCode::CREATED, Cbor(S2SecretUserUpsertResponse { id_user: user_created_id })).into_response()
 }
 #[axum::debug_handler]
 async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Cbor<UserLoginRequest>) -> impl IntoResponse {
