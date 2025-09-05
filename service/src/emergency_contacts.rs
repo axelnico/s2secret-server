@@ -12,10 +12,10 @@ pub struct EmergencyContact {
 
 impl EmergencyContact {
     
-    pub async fn add_emergency_contact_for_user(email: &String, description: Option<&String>, server_key_file: &Vec<u8>, server_share: &Vec<u8> ,user_id: &Uuid, database: &PgPool) -> Uuid {
+    pub async fn add_emergency_contact_for_user(email: &String, description: Option<&String>, server_key_file: &Vec<u8>, server_share: &Vec<u8> ,user_id: &Uuid, database: &PgPool) -> Self {
         let new_emergency_contact_id = Uuid::new_v4();
         sqlx::query!("INSERT INTO emergency_contact(id_emergency_contact, email, description, server_key_file, server_share, user_id) VALUES ($1,$2,$3,$4,$5,$6)",new_emergency_contact_id, email, description, server_key_file, server_share, user_id ).execute(database).await.unwrap();
-        new_emergency_contact_id
+        Self::emergency_contact_data(&new_emergency_contact_id, database).await.unwrap()
     }
     
     pub async fn emergency_contacts_of_secret(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Vec<Self> {

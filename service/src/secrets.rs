@@ -76,7 +76,7 @@ impl Secret {
                                             notes: Option<&Vec<u8>>,
                                             server_share: &Vec<u8>,
                                             user_id: &Uuid,
-                                            database: &PgPool) -> Uuid {
+                                            database: &PgPool) -> Self {
         let new_secret_id = Uuid::new_v4();
         let server_share_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
@@ -86,22 +86,22 @@ impl Secret {
         sqlx::query!("INSERT INTO secret_share(id_secret_share, server_share, created_at, updated_at, id_secret) VALUES ($1, $2, $3, $4, $5)",
                                 server_share_id, server_share, now, now, new_secret_id).execute(&mut *transaction).await.unwrap();
         transaction.commit().await.unwrap();
-        new_secret_id
+        Self::descriptive_data_of_secret(&new_secret_id,&database).await.unwrap()
     }
 
     pub async fn partially_modify_secret_for_user(secret_id: &Uuid, user_id: &Uuid, title: Option<&Vec<u8>>, user_name: Option<&Vec<u8>>,
                                                   site: Option<&Vec<u8>>,
                                                   notes: Option<&Vec<u8>>,
                                                   server_share: Option<&Vec<u8>>,
-                                                  database: &PgPool) -> Option<Uuid> {
+                                                  database: &PgPool) -> Option<Self> {
         let secret = Self::descriptive_data_of_secret_and_user(secret_id, user_id, database).await;
         match secret {
-            Some(secret) => {
+            Some(_) => {
                 let mut transaction = database.begin().await.unwrap();
                 sqlx::query!("UPDATE secret set title = COALESCE($1,title), user_name = COALESCE($2,user_name), site = COALESCE($3,site), notes = COALESCE($4,notes) where id_secret = $5", title,user_name, site, notes, secret_id).execute(&mut *transaction).await.unwrap();
                 sqlx::query!("UPDATE secret_share set server_share = COALESCE($1,server_share) where id_secret = $2", server_share, secret_id).execute(&mut *transaction).await.unwrap();
                 transaction.commit().await.unwrap();
-                Some(secret.id_secret)
+                Self::descriptive_data_of_secret(&secret_id,&database).await
             },
             None => None
         }
@@ -111,7 +111,7 @@ impl Secret {
                                        site: Option<&Vec<u8>>,
                                        notes: Option<&Vec<u8>>,
                                        server_share: &Vec<u8>,
-                                       database: &PgPool) -> Option<Uuid> {
+                                       database: &PgPool) -> Option<Self> {
         let secret = Self::descriptive_data_of_secret_and_user(secret_id, user_id, database).await;
         match secret {
             Some(secret) => {
@@ -119,7 +119,7 @@ impl Secret {
                 sqlx::query!("UPDATE secret set title = $1, user_name = $2, site = $3, notes = $4 where id_secret = $5", title,user_name, site, notes, secret_id).execute(&mut *transaction).await.unwrap();
                 sqlx::query!("UPDATE secret_share set server_share = $1 where id_secret = $2", server_share, secret_id).execute(&mut *transaction).await.unwrap();
                 transaction.commit().await.unwrap();
-                Some(secret.id_secret)
+                Self::descriptive_data_of_secret(&secret_id,&database).await
             },
             None => None
         }
@@ -164,7 +164,7 @@ impl SecretShare {
         }
     }
     
-    pub async fn enable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, proactive_protection: ProactiveProtection, database: &PgPool) -> Option<Uuid> {
+    pub async fn enable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, proactive_protection: ProactiveProtection, database: &PgPool) -> Option<Secret> {
         let mut transaction = database.begin().await.unwrap();
         let secret_share = Self::secret_share(secret_id,user_id,database).await;
         match secret_share {
@@ -172,20 +172,20 @@ impl SecretShare {
                 let proactive_protection = sqlx::query!("SELECT id_proactive_protection from proactive_protection where description = $1",proactive_protection_to_string(proactive_protection)).fetch_one(&mut *transaction).await.unwrap();
                 sqlx::query!("UPDATE secret_share set proactive_protection_id = $1 where id_secret = $2",proactive_protection.id_proactive_protection,secret_id).execute(& mut * transaction).await.unwrap();
                 transaction.commit().await.unwrap();
-                Some(proactive_protection.id_proactive_protection)
+                Secret::descriptive_data_of_secret(&secret_id, &database).await
             },
             None => None,
         }
     }
 
-    pub async fn disable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<()> {
+    pub async fn disable_proactive_protection(secret_id: &Uuid, user_id: &Uuid, database: &PgPool) -> Option<(Secret)> {
         let mut transaction = database.begin().await.unwrap();
         let secret_share = Self::secret_share(secret_id,user_id,database).await;
         match secret_share {
             Some(_) => {
                 sqlx::query!("UPDATE secret_share set proactive_protection_id = null where id_secret = $1",secret_id).execute(& mut * transaction).await.unwrap();
                 transaction.commit().await.unwrap();
-                Some(())
+                Secret::descriptive_data_of_secret(&secret_id, &database).await
             },
             None => None,
         }
