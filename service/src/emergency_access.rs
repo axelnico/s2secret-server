@@ -53,6 +53,7 @@ impl EmergencyContactSecretAccess {
                     None => {
                         sqlx::query!("INSERT INTO emergency_contact_secret_access(id_emergency_contact, id_secret, server_ticket, server_v, server_a) VALUES ($1, $2, $3, $4, $5)",
                                 emergency_contact_id, secret_id, server_ticket, server_v, server_a).execute(&mut *transaction).await.unwrap();
+                        transaction.commit().await.unwrap();
                         Some(emergency_contact_uuid)
                     }
                 }
