@@ -304,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/user/register-finalize", post(user_registration_finish))
         .route("/user/login-finalize", post(user_login_finish))
         .route("/user/2fa", post(user_login_2fa))
+        .route("/emergency-access", post(emergency_access))
         .layer(
             AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
                 .with_config(auth_config.clone()),
