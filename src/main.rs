@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/user/register-finalize", post(user_registration_finish))
         .route("/user/login-finalize", post(user_login_finish))
         .route("/user/2fa", post(user_login_2fa))
-        .route("/emergency-access", post(emergency_access))
+        .route("/emergency-contacts/{emergency_contact_id}/secrets/{secret_id}", post(emergency_access))
         .layer(
             AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
                 .with_config(auth_config.clone()),
@@ -680,7 +680,7 @@ struct EmergencyContactSecretAccessResponse {
     server_v: Vec<u8>
 }
 
-async fn emergency_access(s2secret_state: State<AppState>,Path((secret_id,emergency_contact_id)): Path<(Uuid,Uuid)>, emergency_access_request: Cbor<EmergencyContactSecretAccessRequest>) -> impl IntoResponse {
+async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contact_id,secret_id)): Path<(Uuid,Uuid)>, emergency_access_request: Cbor<EmergencyContactSecretAccessRequest>) -> impl IntoResponse {
     let emergency_contact_secret_access_data = EmergencyContactSecretAccess::emergency_access_for_contact_and_secret(&secret_id,&emergency_contact_id,&s2secret_state.database_pool).await;
     match emergency_contact_secret_access_data {
         Some(emergency_contact_secret_access_data) => {
@@ -706,6 +706,8 @@ async fn emergency_access(s2secret_state: State<AppState>,Path((secret_id,emerge
             // TODO: send a one time code to emergency contact email
             let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
             let emergency_contact_data = EmergencyContact::emergency_contact_data(&emergency_contact_id,&s2secret_state.database_pool).await.unwrap();
+            // TODO: send email to Contact with OTP
+            // TODO: delete emergency data access before sending response
             Cbor(EmergencyContactSecretAccessResponse {
                 title: secret.title,
                 encrypted_secret: ticket.encrypted_secret,
