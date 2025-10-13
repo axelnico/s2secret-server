@@ -12,7 +12,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use s2secret_service::{EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
-use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
+use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, Identifiers, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
 use async_trait::async_trait;
@@ -201,6 +201,7 @@ struct UserRegistrationFinishResult {
 
 #[derive(Deserialize)]
 struct UserLoginRequest {
+    client_identifier: Uuid,
     email: String,
     message: CredentialRequest<DefaultCipherSuite>
 }
@@ -556,7 +557,13 @@ async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<Aut
         password_file,
         user_login_request.0.message.clone(),
         user_login_request.0.email.as_bytes(),
-        ServerLoginStartParameters::default(),
+        ServerLoginStartParameters {
+            context: None,
+            identifiers: Identifiers {
+                client: Some(user_login_request.0.client_identifier.as_bytes()),
+                server: None
+            }
+        },
     ).unwrap();
     auth.session.set("login_start_state", server_login_start_result.state.serialize());
     Cbor(server_login_start_result.message.serialize())
