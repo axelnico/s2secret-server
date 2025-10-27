@@ -586,7 +586,7 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
     let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME is not set in .env file");
     let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD is not set in .env file");
     let email_from = Address::try_from(email_from).unwrap();
-    let email_to = Address::try_from(String::from("s2secret.test@gmail.com")).unwrap();
+    let email_to = Address::try_from(String::from(user_login_request.0.email)).unwrap();
     let one_time_secret_code = one_time_secret_code();
     let email = Message::builder()
         .from(Mailbox::new(None,email_from))
