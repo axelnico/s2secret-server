@@ -11,7 +11,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
+use s2secret_service::{send_one_time_secret_code_to_user, EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, Identifiers, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
@@ -582,34 +582,7 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
     let server_login_state = ServerLogin::<DefaultCipherSuite>::deserialize(&server_login_state).unwrap();
     let server_login_finish_result = server_login_state.finish(user_login_request.0.message.clone()).map_err(|_| StatusCode::UNAUTHORIZED.into_response()).unwrap();
     auth.session.set("session_key",server_login_finish_result.session_key);
-    let email_from = env::var("EMAIL_FROM").expect("EMAIL_FROM is not set in .env file");
-    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME is not set in .env file");
-    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD is not set in .env file");
-    let email_from = Address::try_from(email_from).unwrap();
-    let email_to = Address::try_from(String::from(user_login_request.0.email)).unwrap();
-    let one_time_secret_code = one_time_secret_code();
-    let email = Message::builder()
-        .from(Mailbox::new(None,email_from))
-        .to(Mailbox::new(None, email_to))
-        .subject("S2Secret - One Time Secret Code")
-        .header(ContentType::TEXT_PLAIN)
-        .body(one_time_secret_code.clone())
-        .unwrap();
-
-    let creds = Credentials::new(smtp_username, smtp_password);
-
-    // Open a remote connection to gmail
-    let mailer = SmtpTransport::relay("smtp.gmail.com")
-        .unwrap()
-        .credentials(creds)
-        .build();
-
-    // Send the email
-    match mailer.send(&email) {
-        Ok(_) => println!("Email sent successfully!"),
-        Err(e) => panic!("Could not send email: {e:?}"),
-    }
-    
+    let one_time_secret_code = send_one_time_secret_code_to_user(&user_login_request.0.email).await.unwrap();
     auth.session.set("one_time_secret_code", one_time_secret_code);
     (StatusCode::OK).into_response()
 }
