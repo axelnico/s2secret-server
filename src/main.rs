@@ -687,7 +687,7 @@ async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contac
             let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
             let emergency_contact_data = EmergencyContact::emergency_contact_data(&emergency_contact_id,&s2secret_state.database_pool).await.unwrap();
             // TODO: send email to Contact with OTP
-            // TODO: delete emergency data access before sending response
+            EmergencyContact::remove_emergency_contact_from_secret(&secret_id,&emergency_contact_id, &s2secret_state.database_pool).await;
             Cbor(EmergencyContactSecretAccessResponse {
                 title: secret.title,
                 encrypted_secret: ticket.encrypted_secret,
