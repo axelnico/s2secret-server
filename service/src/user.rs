@@ -8,7 +8,6 @@ pub struct User {
     pub id_user: Uuid,
     pub email: String,
     pub name: String,
-    pub server_key_file: Vec<u8>
 }
 
 #[derive(Deserialize, Serialize)]
@@ -19,16 +18,14 @@ pub struct UserRegistrationData {
 
 impl User {
     pub async fn data(database: &PgPool, id: &Uuid) -> Option<Self> {
-        sqlx::query_as!(Self, "SELECT id_user, email, name, server_key_file from s2secret_user WHERE id_user = $1", id).fetch_optional(database).await.unwrap()
+        sqlx::query_as!(Self, "SELECT id_user, email, name from s2secret_user WHERE id_user = $1", id).fetch_optional(database).await.unwrap()
     }
 
     pub async fn create_new_user(database: &PgPool, email: &String, name: &String, password_file: &[u8], server_auth_setup:&[u8]) -> Uuid {
         let new_user_id = Uuid::new_v4();
         let now = Utc::now().naive_utc();
-        let mut server_key_file = [0u8; 32];
-        rand::rng().fill(&mut server_key_file);
-        sqlx::query!("INSERT INTO s2secret_user(id_user, email, name, server_key_file, created_at, password_file, server_auth_setup) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                                new_user_id, email, name, &server_key_file ,now, password_file, server_auth_setup).execute(database).await.unwrap();
+        sqlx::query!("INSERT INTO s2secret_user(id_user, email, name, created_at, password_file, server_auth_setup) VALUES ($1, $2, $3, $4, $5, $6)",
+                                new_user_id, email, name ,now, password_file, server_auth_setup).execute(database).await.unwrap();
         new_user_id
     }
 

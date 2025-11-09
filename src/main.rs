@@ -158,7 +158,6 @@ struct SecretPatchRequest {
 struct NewEmergencyContactRequest {
     email: String,
     description: Option<String>,
-    server_key_file: Vec<u8>,
     server_share: Vec<u8>
 }
 
@@ -506,8 +505,7 @@ async fn emergency_contacts(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgP
 
 async fn create_emergency_contact(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, s2secret_state: State<AppState>, emergency_contact_request: Cbor<NewEmergencyContactRequest>) -> impl IntoResponse {
     let new_emergency_contact = EmergencyContact::add_emergency_contact_for_user(&emergency_contact_request.0.email,
-                                                             emergency_contact_request.0.description.as_ref(), 
-                                                                                      &emergency_contact_request.0.server_key_file, 
+                                                             emergency_contact_request.0.description.as_ref(),
                                                                                       &emergency_contact_request.0.server_share,
                                                              &auth.id,
                                                              &s2secret_state.database_pool
@@ -656,7 +654,6 @@ struct EmergencyContactSecretAccessResponse {
     user_name: Option<Vec<u8>>,
     site: Option<Vec<u8>>,
     notes: Option<Vec<u8>>,
-    server_key_file: Vec<u8>,
     server_v: Vec<u8>
 }
 
@@ -694,7 +691,6 @@ async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contac
                 user_name: secret.user_name,
                 site: secret.site,
                 notes: secret.notes,
-                server_key_file: emergency_contact_data.server_key_file,
                 server_v: emergency_contact_secret_access_data.server_v
             }).into_response()
         },
