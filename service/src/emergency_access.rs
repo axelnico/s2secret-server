@@ -29,11 +29,12 @@ pub struct Ticket {
 struct EmergencyAccessClientFileContent {
     id_emergency_contact: Uuid,
     id_secret: Uuid,
-    encrypted_data_encryption_key: Vec<u8>,
-    encrypted_ticket_share: Vec<u8>,
-    encrypted_v_share: Vec<u8>,
-    encrypted_a_share: Vec<u8>,
-    encrypted_a : Vec<u8>
+    password_salt: String,
+    data_encryption_key: Vec<u8>,
+    ticket_share: Vec<u8>,
+    v_share: Vec<u8>,
+    a_share: Vec<u8>,
+    a : Vec<u8>
 }
 
 impl EmergencyContactSecretAccess {
@@ -61,18 +62,19 @@ impl EmergencyContactSecretAccess {
         }
     }
 
-    pub async fn send_emergency_access_data_to_emergency_contact(secret_id: &Uuid, emergency_contact_id: &Uuid, user_id: &Uuid, encrypted_data_encryption_key: Vec<u8>, encrypted_ticket_share: Vec<u8>, encrypted_v_share: Vec<u8>, encrypted_a_share: Vec<u8>, encrypted_a: Vec<u8>, database: &PgPool) {
+    pub async fn send_emergency_access_data_to_emergency_contact(secret_id: &Uuid, emergency_contact_id: &Uuid, user_id: &Uuid, password_salt: String, encrypted_data_encryption_key: Vec<u8>, encrypted_ticket_share: Vec<u8>, encrypted_v_share: Vec<u8>, encrypted_a_share: Vec<u8>, encrypted_a: Vec<u8>, database: &PgPool) {
         let emergency_contact = EmergencyContact::emergency_contact_of_user(emergency_contact_id, user_id, database).await.unwrap();
         dotenvy::dotenv().ok();
         let mut buffer = Vec::new();
         let emergency_access_file_content = EmergencyAccessClientFileContent {
             id_emergency_contact: *emergency_contact_id,
             id_secret: *secret_id,
-            encrypted_data_encryption_key,
-            encrypted_ticket_share,
-            encrypted_v_share,
-            encrypted_a_share,
-            encrypted_a
+            data_encryption_key: encrypted_data_encryption_key,
+            password_salt,
+            ticket_share: encrypted_ticket_share,
+            v_share: encrypted_v_share,
+            a_share: encrypted_a_share,
+            a: encrypted_a
         };
         let email_from = env::var("EMAIL_FROM").expect("EMAIL_FROM is not set in .env file");
         let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME is not set in .env file");

@@ -181,7 +181,8 @@ struct EmergencyAccessClientDataRequest {
     encrypted_ticket_share: Vec<u8>,
     encrypted_v_share: Vec<u8>,
     encrypted_a_share: Vec<u8>,
-    encrypted_a : Vec<u8>
+    encrypted_a : Vec<u8>,
+    password_salt: String,
 }
 
 #[derive(Deserialize)]
@@ -486,6 +487,7 @@ async fn send_emergency_access_data_to_contact(auth: AuthSession<AuthUser, Uuid,
     EmergencyContactSecretAccess::send_emergency_access_data_to_emergency_contact(&secret_id,
                                                                                   &emergency_contact_id,
                                                                                   &auth.id,
+                                                                                  emergency_data_access_to_be_sent.0.password_salt,
                                                                                   emergency_data_access_to_be_sent.0.encrypted_data_encryption_key,
                                                                                   emergency_data_access_to_be_sent.0.encrypted_ticket_share,
                                                                                   emergency_data_access_to_be_sent.0.encrypted_v_share,
