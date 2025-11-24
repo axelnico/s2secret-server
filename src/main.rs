@@ -163,7 +163,6 @@ struct NewEmergencyContactRequest {
 
 #[derive(Deserialize, Serialize)]
 struct OneTimeSecretCodeRequest {
-    email: String,
     secret_code: String,
 }
 
@@ -306,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/user/login-finalize", post(user_login_finish))
         .route("/user/2fa", post(user_login_2fa))
         .route("/emergency-contacts/{emergency_contact_id}/secrets/{secret_id}", post(emergency_access))
+        .route("/emergency-contacts/{emergency_contact_id}/secrets/{secret_id}/2fa", post(emergency_access_2fa))
         .layer(
             AuthSessionLayer::<AuthUser, Uuid, SessionPgPool, PgPool>::new(Some(s2secret_database.clone()))
                 .with_config(auth_config.clone()),
@@ -584,11 +584,13 @@ async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<Au
     auth.session.set("session_key",server_login_finish_result.session_key);
     let one_time_secret_code = send_one_time_secret_code_to_user(&user_login_request.0.email).await.unwrap();
     auth.session.set("one_time_secret_code", one_time_secret_code);
+    auth.session.set("email", user_login_request.0.email);
     (StatusCode::OK).into_response()
 }
 
 async fn user_login_2fa(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, secret_code_request: Cbor<OneTimeSecretCodeRequest>) -> impl IntoResponse {
-    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&secret_code_request.0.email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let email =  auth.session.get_remove("email").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let logged_in_user_id = User::user_id(&s2secret_state.database_pool,&email).await.ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
     let one_time_secret_code: String = auth.session.get_remove("one_time_secret_code").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
     if one_time_secret_code != secret_code_request.0.secret_code {
         StatusCode::UNAUTHORIZED.into_response()
@@ -659,7 +661,29 @@ struct EmergencyContactSecretAccessResponse {
     server_v: Vec<u8>
 }
 
-async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contact_id,secret_id)): Path<(Uuid,Uuid)>, emergency_access_request: Cbor<EmergencyContactSecretAccessRequest>) -> impl IntoResponse {
+async fn emergency_access_2fa(s2secret_state: State<AppState>,Path((emergency_contact_id,secret_id)): Path<(Uuid,Uuid)>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>,secret_code_request: Cbor<OneTimeSecretCodeRequest>) -> impl IntoResponse {
+    let encrypted_secret: Vec<u8> = auth.session.get_remove("encrypted_secret").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let server_v: Vec<u8> = auth.session.get_remove("server_v").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    let one_time_secret_code: String = auth.session.get_remove("one_time_secret_code").ok_or_else(|| StatusCode::UNAUTHORIZED.into_response()).unwrap();
+    if one_time_secret_code != secret_code_request.0.secret_code {
+        StatusCode::UNAUTHORIZED.into_response()
+    } else {
+        auth.session.clear();
+        auth.session.destroy();
+        let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
+        EmergencyContact::remove_emergency_contact_from_secret(&secret_id,&emergency_contact_id, &s2secret_state.database_pool).await;
+        Cbor(EmergencyContactSecretAccessResponse {
+            title: secret.title,
+            encrypted_secret,
+            user_name: secret.user_name,
+            site: secret.site,
+            notes: secret.notes,
+            server_v
+        }).into_response()
+    }
+}
+
+async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contact_id,secret_id)): Path<(Uuid,Uuid)>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, emergency_access_request: Cbor<EmergencyContactSecretAccessRequest>) -> impl IntoResponse {
     let emergency_contact_secret_access_data = EmergencyContactSecretAccess::emergency_access_for_contact_and_secret(&secret_id,&emergency_contact_id,&s2secret_state.database_pool).await;
     match emergency_contact_secret_access_data {
         Some(emergency_contact_secret_access_data) => {
@@ -682,19 +706,12 @@ async fn emergency_access(s2secret_state: State<AppState>,Path((emergency_contac
                 // TODO: also use hashing server side, as client side hashing alone is not secure. Not too critical as server hash is not stored directly 
                 return (StatusCode::UNAUTHORIZED).into_response();
             }
-            // TODO: send a one time code to emergency contact email
-            let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
-            let emergency_contact_data = EmergencyContact::emergency_contact_data(&emergency_contact_id,&s2secret_state.database_pool).await.unwrap();
-            // TODO: send email to Contact with OTP
-            EmergencyContact::remove_emergency_contact_from_secret(&secret_id,&emergency_contact_id, &s2secret_state.database_pool).await;
-            Cbor(EmergencyContactSecretAccessResponse {
-                title: secret.title,
-                encrypted_secret: ticket.encrypted_secret,
-                user_name: secret.user_name,
-                site: secret.site,
-                notes: secret.notes,
-                server_v: emergency_contact_secret_access_data.server_v
-            }).into_response()
+            let emergency_contact = EmergencyContact::emergency_contact_data(&emergency_contact_id, &s2secret_state.database_pool).await.unwrap();
+            let one_time_secret_code = send_one_time_secret_code_to_user(&emergency_contact.email).await.unwrap();
+            auth.session.set("one_time_secret_code", one_time_secret_code);
+            auth.session.set("encrypted_secret", &ticket.encrypted_secret);
+            auth.session.set("server_v", &emergency_contact_secret_access_data.server_v);
+            (StatusCode::OK).into_response()
         },
         None => (StatusCode::NOT_FOUND, Cbor(S2SecretError { msg: "Emergency access not found"})).into_response()
     }
