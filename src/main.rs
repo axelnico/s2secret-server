@@ -40,6 +40,14 @@ use validator::Validate;
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
 
+
+const ENCRYPTED_TITLE_MAX_LENGTH: u64 = 92; // 64 + 28 (IV + AuthTAG)
+const ENCRYPTED_USERNAME_MAX_LENGTH: u64 = 284; // 256 + 28 (IV + AuthTAG)
+const ENCRYPTED_SITE_MAX_LENGTH: u64 = 1052; // 1024 + 28 (IV + AuthTAG)
+const ENCRYPTED_NOTES_MAX_LENGTH: u64 = 10028; // 10.000 + 28 (IV + AuthTAG)
+const SERVER_SHARE_LENGTH: u64 = 129;
+const S2SECRET_USER_NAME_MAX_LENGTH: u64 = 256;
+
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
     type KeGroup = opaque_ke::Ristretto255;
@@ -69,15 +77,11 @@ where
         let auth_session = req.extensions().get::<AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>>().cloned();
         let bytes = Bytes::from_request(req, state).await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        match auth_session
+        let value: T = match auth_session
         {
             None => {
-                let value: T = ciborium::de::from_reader(bytes.as_ref())
-                    .map_err(|_| StatusCode::BAD_REQUEST)?;
-                match value.validate() {
-                    Ok(_) => Ok(Cbor(value)),
-                    Err(_) =>  Err(StatusCode::BAD_REQUEST)
-                }
+                ciborium::de::from_reader(bytes.as_ref())
+                    .map_err(|_| StatusCode::BAD_REQUEST)?
             },
             Some(auth_session) => {
                 if auth_session.is_authenticated() {
@@ -86,15 +90,17 @@ where
                     let nonce = cose_message.unprotected.iv;
                     let cbor_encrypted_payload = cose_message.ciphertext.unwrap_or_default();
                     let decrypted_request_content    = decrypt_using_nonce(&encryption_key,&cbor_encrypted_payload,&nonce).map_err(|_| StatusCode::BAD_REQUEST)?;
-                    let value = ciborium::de::from_reader(Bytes::from(decrypted_request_content).as_ref())
-                        .map_err(|_| StatusCode::BAD_REQUEST)?;
-                    Ok(Cbor(value))
+                    ciborium::de::from_reader(Bytes::from(decrypted_request_content).as_ref())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?
                 } else {
-                    let value = ciborium::de::from_reader(bytes.as_ref())
-                        .map_err(|_| StatusCode::BAD_REQUEST)?;
-                    Ok(Cbor(value))
+                    ciborium::de::from_reader(bytes.as_ref())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?
                 }
             }
+        };
+        match value.validate() {
+            Ok(_) => Ok(Cbor(value)),
+            Err(_) =>  Err(StatusCode::BAD_REQUEST)
         }
     }
 }
@@ -144,22 +150,33 @@ struct S2SecretUserUpsertResponse {
 
 #[derive(Deserialize,Validate,Serialize)]
 struct SecretUpsertRequest {
+    #[validate(length(max = ENCRYPTED_TITLE_MAX_LENGTH))]
     title: Vec<u8>,
+    #[validate(length(max = ENCRYPTED_USERNAME_MAX_LENGTH))]
     user_name: Option<Vec<u8>>,
+    #[validate(length(max = ENCRYPTED_SITE_MAX_LENGTH))]
     site: Option<Vec<u8>>,
+    #[validate(length(max = ENCRYPTED_NOTES_MAX_LENGTH))]
     notes: Option<Vec<u8>>,
+    #[validate(length(equal = SERVER_SHARE_LENGTH))]
     server_share: Vec<u8>,
 }
 #[derive(Deserialize,Validate,Serialize)]
 struct SecretPatchRequest {
+    #[validate(length(max = ENCRYPTED_TITLE_MAX_LENGTH))]
     title: Option<Vec<u8>>,
+    #[validate(length(max = ENCRYPTED_USERNAME_MAX_LENGTH))]
     user_name: Option<Vec<u8>>,
+    #[validate(length(max = ENCRYPTED_SITE_MAX_LENGTH))]
     site: Option<Vec<u8>>,
+    #[validate(length(max = ENCRYPTED_NOTES_MAX_LENGTH))]
     notes: Option<Vec<u8>>,
+    #[validate(length(equal = SERVER_SHARE_LENGTH))]
     server_share: Option<Vec<u8>>,
 }
 #[derive(Deserialize,Validate, Serialize)]
 struct NewEmergencyContactRequest {
+    #[validate(email)]
     email: String,
     description: Option<String>,
     server_share: Vec<u8>
@@ -196,14 +213,18 @@ pub struct ShareRenewalRequest {
 
 #[derive(Deserialize,Validate)]
 struct UserRegistrationRequest {
+    #[validate(length(max = S2SECRET_USER_NAME_MAX_LENGTH))]
     name: String,
+    #[validate(email)]
     email: String,
     message: RegistrationRequest<DefaultCipherSuite>
 }
 
 #[derive(Deserialize,Validate)]
 struct UserRegistrationFinishResult {
+    #[validate(length(max = S2SECRET_USER_NAME_MAX_LENGTH))]
     name: String,
+    #[validate(email)]
     email: String,
     message: RegistrationUpload<DefaultCipherSuite>
 }
@@ -211,12 +232,14 @@ struct UserRegistrationFinishResult {
 #[derive(Deserialize,Validate)]
 struct UserLoginRequest {
     client_identifier: Uuid,
+    #[validate(email)]
     email: String,
     message: CredentialRequest<DefaultCipherSuite>
 }
 
 #[derive(Deserialize,Validate)]
 struct UserLoginFinishRequest {
+    #[validate(email)]
     email: String,
     message: CredentialFinalization<DefaultCipherSuite>
 }
