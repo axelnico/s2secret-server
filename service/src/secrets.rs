@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use sharks::{Share, Sharks};
+use validator::{Validate, ValidationErrors};
 
 #[derive(Deserialize, Serialize)]
 pub struct Secret {
@@ -29,13 +30,18 @@ pub struct SecretShare {
     created_at: NaiveDateTime,
     updated_at: NaiveDateTime,
 }
+
+impl Validate for ProactiveProtection {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        Ok(())
+    }
+}
 #[derive(Deserialize, Serialize)]
 pub enum ProactiveProtection {
     Medium,
     High,
     Extreme
 }
-
 fn proactive_protection_to_string(proactive_protection: ProactiveProtection) -> String {
     match proactive_protection {
         ProactiveProtection::Medium => "Medium".to_string(),

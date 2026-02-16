@@ -35,6 +35,7 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use rand::distr::Alphanumeric;
 use rand::Rng;
+use validator::Validate;
 
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
@@ -59,7 +60,7 @@ pub struct Cbor<T>(pub T);
 //#[async_trait]
 impl<T, S> FromRequest<S> for Cbor<T>
 where
-    T: serde::de::DeserializeOwned,
+    T: serde::de::DeserializeOwned + Validate,
     S: Send + Sync,
 {
     type Rejection = StatusCode;
@@ -71,9 +72,12 @@ where
         match auth_session
         {
             None => {
-                let value = ciborium::de::from_reader(bytes.as_ref())
+                let value: T = ciborium::de::from_reader(bytes.as_ref())
                     .map_err(|_| StatusCode::BAD_REQUEST)?;
-                Ok(Cbor(value))
+                match value.validate() {
+                    Ok(_) => Ok(Cbor(value)),
+                    Err(_) =>  Err(StatusCode::BAD_REQUEST)
+                }
             },
             Some(auth_session) => {
                 if auth_session.is_authenticated() {
@@ -138,7 +142,7 @@ struct S2SecretUserUpsertResponse {
     id_user: Uuid
 }
 
-#[derive(Debug,Deserialize, Serialize)]
+#[derive(Deserialize,Validate,Serialize)]
 struct SecretUpsertRequest {
     title: Vec<u8>,
     user_name: Option<Vec<u8>>,
@@ -146,7 +150,7 @@ struct SecretUpsertRequest {
     notes: Option<Vec<u8>>,
     server_share: Vec<u8>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize,Validate,Serialize)]
 struct SecretPatchRequest {
     title: Option<Vec<u8>>,
     user_name: Option<Vec<u8>>,
@@ -154,19 +158,19 @@ struct SecretPatchRequest {
     notes: Option<Vec<u8>>,
     server_share: Option<Vec<u8>>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize,Validate, Serialize)]
 struct NewEmergencyContactRequest {
     email: String,
     description: Option<String>,
     server_share: Vec<u8>
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize,Validate, Serialize)]
 struct OneTimeSecretCodeRequest {
     secret_code: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct EmergencyAccessRequest {
     id_emergency_contact: Uuid,
     server_ticket: Vec<u8>,
@@ -174,7 +178,7 @@ struct EmergencyAccessRequest {
     server_a: Vec<u8>
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct EmergencyAccessClientDataRequest {
     encrypted_data_encryption_key: Vec<u8>,
     encrypted_ticket_share: Vec<u8>,
@@ -184,28 +188,34 @@ struct EmergencyAccessClientDataRequest {
     password_salt: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate, Serialize)]
+pub struct ShareRenewalRequest {
+    pub share: Vec<u8>,
+    updated_at: NaiveDateTime
+}
+
+#[derive(Deserialize,Validate)]
 struct UserRegistrationRequest {
     name: String,
     email: String,
     message: RegistrationRequest<DefaultCipherSuite>
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct UserRegistrationFinishResult {
     name: String,
     email: String,
     message: RegistrationUpload<DefaultCipherSuite>
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct UserLoginRequest {
     client_identifier: Uuid,
     email: String,
     message: CredentialRequest<DefaultCipherSuite>
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct UserLoginFinishRequest {
     email: String,
     message: CredentialFinalization<DefaultCipherSuite>
@@ -406,7 +416,7 @@ async fn secret_share(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, 
     }
 }
 
-async fn secret_share_renewal(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, renewal_share: Cbor<ShareRenewal>) -> impl IntoResponse {
+async fn secret_share_renewal(auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, Path(secret_id): Path<Uuid>, s2secret_state: State<AppState>, renewal_share: Cbor<ShareRenewalRequest>) -> impl IntoResponse {
     let client_share_renewal = SecretShare::renew_secret_share(&secret_id,&auth.id, &Share::try_from(renewal_share.0.share.as_slice()).ok().unwrap(),&s2secret_state.database_pool).await;
     match client_share_renewal {
         Some(client_share_renewal) => Cbor(client_share_renewal).into_response(),
@@ -642,7 +652,7 @@ async fn opaque_config(s2secret_state: State<AppState>) -> impl IntoResponse {
     Cbor(client_registration_start_result.message)
 }
 
-#[derive(Debug,Deserialize, Serialize)]
+#[derive(Debug,Deserialize,Validate, Serialize)]
 struct EmergencyContactSecretAccessRequest {
     password_hash: String,
     //one_time_pad: Vec<u8>, TODO: sending the one time pad in clear does not add any protection. Should be encrypted with server public key
