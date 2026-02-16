@@ -1,4 +1,4 @@
-use axum::{Router, extract::State, Json, routing::{get, post, delete, put}, Error};
+use axum::{Router, extract::State, routing::{get, post, delete, put}, Error};
 use axum::extract::{FromRequest, Path};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -30,13 +30,8 @@ use hmac_sha512::HMAC;
 use sqlx::types::chrono::NaiveDateTime;
 use bincode::{config, Decode, Encode};
 use lettre::{Address, Message, SmtpTransport, Transport};
-use lettre::message::{Mailbox, MultiPart, SinglePart};
-use lettre::message::header::ContentType;
-use lettre::transport::smtp::authentication::Credentials;
-use rand::distr::Alphanumeric;
-use rand::Rng;
 use validator::Validate;
-
+use s2secret_service::{encrypt_with_nonce,decrypt_using_nonce};
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
 
@@ -55,12 +50,6 @@ impl CipherSuite for DefaultCipherSuite {
     type Ksf = Argon2<'static>;
 }
 
-fn decrypt_using_nonce(key: &[u8], ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u8>, ()> {
-    let key = Key::<Aes256Gcm>::from_slice(&key[..32]);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce = Nonce::from_slice(&nonce[..12]);
-    cipher.decrypt(nonce,ciphertext).map_err(|_| ())
-}
 
 // Custom CBOR extractor
 pub struct Cbor<T>(pub T);
@@ -289,12 +278,6 @@ impl Authentication<AuthUser, Uuid, PgPool> for AuthUser {
     }
 }
 
-fn encrypt_with_nonce(key: &[u8], plaintext: &[u8], nonce: Nonce<U12>) -> Result<Vec<u8>, ()> {
-    let key = Key::<Aes256Gcm>::from_slice(&key[..32]);
-    let cipher = Aes256Gcm::new(&key);
-    let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref()).map_err(|_| ())?;
-    Ok(ciphertext)
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -600,14 +583,6 @@ async fn user_login_start(s2secret_state: State<AppState>, auth: AuthSession<Aut
     ).unwrap();
     auth.session.set("login_start_state", server_login_start_result.state.serialize());
     Cbor(server_login_start_result.message.serialize())
-}
-
-fn one_time_secret_code() -> String {
-    rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(12)
-        .map(char::from)
-        .collect()
 }
 
 async fn user_login_finish(s2secret_state: State<AppState>, auth: AuthSession<AuthUser, Uuid, SessionPgPool, PgPool>, user_login_request: Cbor<UserLoginFinishRequest>) -> impl IntoResponse {

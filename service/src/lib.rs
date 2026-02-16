@@ -15,3 +15,5 @@ pub use user::User;
 pub use emergency_access::EmergencyContactSecretAccess;
 pub use emergency_access::Ticket;
 pub use mail::send_one_time_secret_code_to_user;
+pub use cryptography::decrypt_using_nonce;
+pub use cryptography::encrypt_with_nonce;
