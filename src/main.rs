@@ -3,6 +3,8 @@ use axum::extract::{FromRequest, Path};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use std::env;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
@@ -23,6 +25,7 @@ use axum::extract::Request;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware::Next;
 use axum::response::Response;
+use axum_server::tls_rustls::RustlsConfig;
 use axum_session_auth::{AuthConfig, AuthSession, AuthSessionLayer, Authentication};
 use coset::{AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder, HeaderBuilder};
 use sharks::{Share, Sharks};
@@ -32,6 +35,7 @@ use bincode::{config, Decode, Encode};
 use lettre::{Address, Message, SmtpTransport, Transport};
 use validator::Validate;
 use s2secret_service::{encrypt_with_nonce,decrypt_using_nonce};
+use rustls::crypto::ring;
 // Ciphersuite to be used in the OPAQUE protocol
 struct DefaultCipherSuite;
 
@@ -282,6 +286,9 @@ impl Authentication<AuthUser, Uuid, PgPool> for AuthUser {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
     let s2secret_database_url = env::var("DATABASE_URL").expect("DATABASE_URL is not set in .env file");
     let s2secret_database = PgPoolOptions::new().connect(&s2secret_database_url).await.expect("Cannot connect to s2secret database");
 
@@ -367,8 +374,44 @@ async fn main() -> anyhow::Result<()> {
         .fallback(fallback)
         .with_state(s2secret_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, s2secret).await?;
+    let https_port = 3000;
+
+    let listening_address = SocketAddr::from(([127, 0, 0, 1], https_port));
+
+    //let is_development_environment = std::env::var("APP_ENV").unwrap_or_default() == "development";
+
+    let (cert_pem, key_pem) = {
+        let cert_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("certs")
+            .join("s2secret_cert.pem");
+        let key_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("certs")
+            .join("s2secret_key.pem");
+
+        let certs = std::fs::read(cert_path)?;
+        let keys = std::fs::read(key_path)?;
+        (certs, keys)
+    };
+
+    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
+        .map(|r| r.expect("Failed to parse certificate"))
+        .collect();
+
+    let private_key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .expect("Failed to read private key").expect("No private key found in file");
+
+    let server_config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(certs, private_key)?;
+
+    let server_config = RustlsConfig::from_config(Arc::new(server_config));
+
+    axum_server::bind_rustls(listening_address, server_config)
+        .serve(s2secret.into_make_service())
+        .await?;
+
+    //let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    //axum::serve(listener, s2secret).await?;
     Ok(())
 }
 
