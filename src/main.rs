@@ -407,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
     let server_config = RustlsConfig::from_config(Arc::new(server_config));
 
     axum_server::bind_rustls(listening_address, server_config)
+        .http2_only()
         .serve(s2secret.into_make_service())
         .await?;
 
