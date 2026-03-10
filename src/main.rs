@@ -13,7 +13,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use s2secret_service::{send_one_time_secret_code_to_user, EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
+use s2secret_service::{send_emergency_secret_access_notification_to_owner, send_one_time_secret_code_to_user, EmergencyContact, EmergencyContactSecretAccess, ProactiveProtection, Secret, SecretShare, ShareRenewal, Ticket, User};
 use opaque_ke::{CipherSuite, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest, Identifiers, RegistrationRequest, RegistrationUpload, ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup};
 use opaque_ke::rand::rngs::OsRng;
 use argon2::Argon2;
@@ -723,7 +723,10 @@ async fn emergency_access_2fa(s2secret_state: State<AppState>,Path((emergency_co
         auth.session.clear();
         auth.session.destroy();
         let secret = Secret::descriptive_data_of_secret(&secret_id,&s2secret_state.database_pool).await.unwrap();
+        let emergency_contact = EmergencyContact::emergency_contact_data(&emergency_contact_id,&s2secret_state.database_pool).await.unwrap();
+        let s2secret_owner = User::data(&s2secret_state.database_pool,&emergency_contact.user_id).await.unwrap();
         EmergencyContact::remove_emergency_contact_from_secret(&secret_id,&emergency_contact_id, &s2secret_state.database_pool).await;
+        send_emergency_secret_access_notification_to_owner(&s2secret_owner.email,&emergency_contact.email).await.unwrap();
         Cbor(EmergencyContactSecretAccessResponse {
             title: secret.title,
             encrypted_secret,

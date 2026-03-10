@@ -15,6 +15,14 @@ pub async fn send_one_time_secret_code_to_user(email: &str) -> Result<String, le
     }
 }
 
+pub async fn send_emergency_secret_access_notification_to_owner(s2secret_user_email: &str, contact_description: &str) -> Result<(), lettre::transport::smtp::Error> {
+    match send_email(s2secret_user_email,"S2Secret - Emergency Access Notification", 
+                     format!("Your contact {} has accessed one of your secrets using the emergency access feature", contact_description)).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 async fn send_email(to_address: &str, subject: &str, body: String) -> Result<Response, lettre::transport::smtp::Error> {
     let email_from = env::var("EMAIL_FROM").expect("EMAIL_FROM is not set in .env file");
     let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME is not set in .env file");
